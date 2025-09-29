@@ -1,0 +1,98 @@
+/* src/App.css */
+body {
+  font-family: Arial, sans-serif;
+  margin: 0;
+  background-color: #f4f4f4;
+  color: #333;
+}
+
+/* src/App.css */
+
+.App {
+  text-align: center;
+}
+
+.App-header {
+  background-color: #282c34;
+  padding: 20px;
+  color: white;
+  border-bottom: 5px solid #61dafb;
+}
+
+.App-header h1 {
+  margin: 0 0 10px 0;
+  font-size: 1.8em;
+}
+
+.App-header nav button {
+  background-color: #61dafb;
+  color: #282c34;
+  border: none;
+  padding: 10px 20px;
+  margin: 0 5px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-weight: bold;
+  transition: background-color 0.3s ease;
+}
+
+.App-header nav button:hover {
+  background-color: #21a1f1;
+}
+
+.App-header nav button.active {
+  background-color: white;
+  color: #282c34;
+  border: 2px solid #61dafb;
+}
+
+.App-main {
+  max-width: 900px;     
+  margin-left: auto;    
+  margin-right: auto;  
+  margin-top: 20px;     
+  text-align: left;    
+
+  padding: 20px;
+  background-color:white;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.reportes-container, .administracion-container {
+  padding: 15px;
+  text-align: left;
+}
+
+.reportes-container h2, .administracion-container h2 {
+  color: #282c34;
+  margin-top: 0;
+  font-size: 1.5em;
+}
+
+.reportes-container table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 15px;
+}
+
+.reportes-container th, .reportes-container td {
+  border: 1px solid #ddd;
+  padding: 8px;
+  text-align: left;
+}
+
+.reportes-container th {
+  background-color: #f2f2f2;
+  font-weight: bold;
+}
+
+.reportes-container button, .administracion-container button {
+  background-color: #007bff;
+  color: white;
+  border: none;
+  padding: 10px 15px;
+  border-radius: 5px;
+  cursor: pointer;
+  margin-right: 10px;
+  transition: background-color 0.3;
