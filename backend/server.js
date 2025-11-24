@@ -379,7 +379,18 @@ app.post("/detectar-placa", async (req, res) => {
     console.log("✅ Placa detectada:", placa);
     
     // Verificar si el vehículo existe en la BD
-    const checkQuery = "SELECT Placa, EsAutorizado FROM Vehiculos WHERE Placa = ?";
+    const checkQuery = `
+      SELECT 
+        v.Placa, 
+        v.EsAutorizado,
+        v.Marca,
+        v.Modelo,
+        v.TipoVehiculo,
+        CONCAT(e.Nombre, ' ', e.ApellidoPaterno, ' ', IFNULL(e.ApellidoMaterno, '')) AS NombreCompleto
+      FROM Vehiculos v
+      LEFT JOIN Empleados e ON v.EmpleadoID = e.EmpleadoID
+      WHERE v.Placa = ?
+    `;
     
     db.query(checkQuery, [placa], (err, vehiculos) => {
       if (err) {
@@ -389,6 +400,7 @@ app.post("/detectar-placa", async (req, res) => {
       
       // Si existe en la BD y está autorizado
       let estado = (vehiculos.length > 0 && vehiculos[0].EsAutorizado) ? "AUTORIZADO" : "NO_RECONOCIDO";
+      let infoVehiculo = vehiculos.length > 0 ? vehiculos[0] : null;
       
       console.log(`🚗 Placa ${placa} - Estado: ${estado}`);
       
@@ -412,7 +424,12 @@ app.post("/detectar-placa", async (req, res) => {
           plate: placa,
           estado: estado,
           confidence: result.confidence,
-          registroId: insertResult.insertId
+          registroId: insertResult.insertId,
+          // ✅ AGREGAR INFO DEL VEHÍCULO
+          propietario: infoVehiculo?.NombreCompleto || "Visitante",
+          vehiculo: infoVehiculo 
+            ? `${infoVehiculo.Marca} ${infoVehiculo.Modelo} (${infoVehiculo.TipoVehiculo})`
+            : "No registrado"
         });
       });
     });

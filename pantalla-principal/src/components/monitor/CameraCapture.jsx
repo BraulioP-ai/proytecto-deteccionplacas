@@ -132,30 +132,15 @@ export default function CameraCapture({ darkMode, guardia }) {
       if (data.success && data.plate) {
         console.log("✅ Placa detectada:", data.plate);
 
-        const registroData = {
+        // ✅ El backend ya registró, solo mostramos la info
+        setUltimaDeteccion({
           placa: data.plate,
-          guardia_id: guardia?.id || 1,
-        };
-
-        const registroResponse = await fetch(`${API_URL}/acceso/manual`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(registroData),
+          confianza: data.confidence || 0.8,
+          estado: data.estado || "NO_RECONOCIDO",
+          timestamp: new Date().toLocaleString("es-MX"),
+          propietario: data.propietario || "Visitante",
+          vehiculo: data.vehiculo || "No registrado",
         });
-
-        if (registroResponse.ok) {
-          const registro = await registroResponse.json();
-          setUltimaDeteccion({
-            placa: data.plate,
-            confianza: data.confidence,
-            estado: registro.EstadoAutorizacion,
-            timestamp: new Date().toLocaleString("es-MX"),
-            propietario: registro.NombreCompleto || "Visitante",
-            vehiculo: registro.Marca && registro.Modelo 
-              ? `${registro.Marca} ${registro.Modelo}`
-              : "No registrado",
-          });
-        }
       } else {
         console.log("⚠️ No se detectó placa:", data.message);
       }
