@@ -1,517 +1,82 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+import easyocr
 import cv2
 import numpy as np
-import pytesseract
-from PIL import Image
-import os
-import base64
 from datetime import datetime
+import os
 import re
 
 app = Flask(__name__)
 CORS(app)
 
-def evaluar_calidad_imagen(image_path):
+# Inicializar EasyOCR (solo una vez al inicio)
+print("🔄 Inicializando EasyOCR (puede tardar un poco la primera vez)...")
+reader = easyocr.Reader(['en'], gpu=False)  # 'en' para letras y números
+print("✅ EasyOCR listo!")
+
+
+def limpiar_placa(texto):
     """
-    MEJORA 17: Evaluar si la imagen tiene buena calidad para OCR
-    VERSIÓN MUY RELAJADA - Solo rechaza casos extremos
-    """
-    img = cv2.imread(image_path)
-    if img is None:
-        return False, "Imagen no válida"
-    
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    
-    # 1. Detectar desenfoque con Laplacian (MUY RELAJADO)
-    laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
-    print(f"🔍 Desenfoque: {laplacian_var:.1f} (mínimo: 10)")
-    if laplacian_var < 10:  # Bajado de 50 a 10
-        return False, f"Imagen MUY borrosa (score: {laplacian_var:.1f})"
-    
-    # 2. Detectar sobreexposición/subexposición (MUY RELAJADO)
-    mean_brightness = np.mean(gray)
-    print(f"💡 Brillo: {mean_brightness:.1f} (rango: 15-240)")
-    if mean_brightness < 15:  # Bajado de 30 a 15
-        return False, f"Imagen MUY oscura (brillo: {mean_brightness:.1f})"
-    if mean_brightness > 240:  # Subido de 225 a 240
-        return False, f"Imagen MUY brillante (brillo: {mean_brightness:.1f})"
-    
-    # 3. Verificar contraste (MUY RELAJADO)
-    std_brightness = np.std(gray)
-    print(f"📊 Contraste: {std_brightness:.1f} (mínimo: 10)")
-    if std_brightness < 10:  # Bajado de 20 a 10
-        return False, f"Muy poco contraste (std: {std_brightness:.1f})"
-    
-    print(f"✅ Calidad ACEPTABLE: desenfoque={laplacian_var:.1f}, brillo={mean_brightness:.1f}, contraste={std_brightness:.1f}")
-    return True, "Buena calidad"
-
-
-def detect_plate(image_path, output_path="plate_detected.jpg"):
-    """
-    Detecta y recorta la región de la placa - VERSIÓN BALANCEADA
-    Busca rectángulos que realmente parezcan placas mexicanas
-    """
-    img = cv2.imread(image_path)
-    if img is None:
-        return None
-
-    height, width = img.shape[:2]
-    
-    # Si la imagen es muy pequeña, escalarla
-    if width < 640:
-        scale = 640 / width
-        img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
-        height, width = img.shape[:2]
-    
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    
-    # Ecualización moderada
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-    gray = clahe.apply(gray)
-    
-    # Técnicas de detección de bordes BALANCEADAS
-    blur1 = cv2.bilateralFilter(gray, 11, 17, 17)
-    edges1 = cv2.Canny(blur1, 30, 180)
-    
-    blur2 = cv2.GaussianBlur(gray, (5,5), 0)
-    edges2 = cv2.Canny(blur2, 40, 200)
-    
-    # Combinar
-    edges = cv2.bitwise_or(edges1, edges2)
-    
-    # Dilatación moderada
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (4, 3))
-    edges = cv2.dilate(edges, kernel, iterations=2)
-
-    contours, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)[:40]
-
-    print(f"🔍 Analizando {len(contours)} contornos...")
-
-    candidates = []
-
-    for cnt in contours:
-        perimeter = cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, 0.02 * perimeter, True)
-
-        # Aceptar formas de 4 a 8 lados
-        if len(approx) >= 4 and len(approx) <= 8:
-            x, y, w, h = cv2.boundingRect(cnt)
-            
-            aspect_ratio = w / float(h) if h > 0 else 0
-            area = w * h
-            
-            # Calcular densidad de bordes
-            roi_edges = edges[y:y+h, x:x+w]
-            edge_density = np.sum(roi_edges > 0) / (w * h) if (w * h) > 0 else 0
-            
-            # FILTROS BALANCEADOS - Específicos para placas mexicanas
-            max_area = (width * height) * 0.4  # Máximo 40% de imagen
-            min_area = 3000 if width > 800 else 1500  # Área mínima razonable
-            
-            # Aspect ratio de placas mexicanas: entre 2.0 y 4.5
-            # Con decoración pueden llegar a 5.0
-            if (2.0 < aspect_ratio < 5.0 and 
-                min_area < area < max_area and 
-                h > 20 and w > 60 and  # Mínimos realistas
-                edge_density > 0.08):  # Debe tener suficientes bordes
-                
-                # Score balanceado
-                ratio_ideal = 3.3  # Ratio típico de placas mexicanas
-                ratio_score = 1 / (1 + abs(aspect_ratio - ratio_ideal) * 0.8)
-                area_score = min(area / 8000, 1.2)
-                position_score = max(0.3, 1 - (y / height))  # No penalizar mucho posición
-                edge_score = min(edge_density * 8, 1.0)
-                
-                total_score = (area_score * 0.4) + (ratio_score * 0.3) + (edge_score * 0.2) + (position_score * 0.1)
-                
-                candidates.append({
-                    'bbox': (x, y, w, h),
-                    'score': total_score,
-                    'area': area,
-                    'ratio': aspect_ratio,
-                    'edges': edge_density
-                })
-
-    # Si no hay candidatos, relajar un POCO (no mucho)
-    if not candidates:
-        print("⚠️ Sin candidatos estrictos, relajando filtros moderadamente...")
-        
-        for cnt in contours[:25]:
-            x, y, w, h = cv2.boundingRect(cnt)
-            aspect_ratio = w / float(h) if h > 0 else 0
-            area = w * h
-            
-            # Filtros relajados PERO sensatos
-            if (1.8 < aspect_ratio < 5.5 and 
-                area > 2000 and 
-                h > 15 and w > 50):
-                
-                candidates.append({
-                    'bbox': (x, y, w, h),
-                    'score': area / 6000,
-                    'area': area,
-                    'ratio': aspect_ratio,
-                    'edges': 0.0
-                })
-                
-        print(f"🔍 Candidatos con filtros relajados: {len(candidates)}")
-    else:
-        print(f"✅ Candidatos con filtros estrictos: {len(candidates)}")
-    
-    if not candidates:
-        print("❌ No se encontró ninguna región que parezca una placa")
-        return None
-    
-    # Ordenar por score
-    candidates = sorted(candidates, key=lambda x: x['score'], reverse=True)
-    
-    # Mostrar top 3
-    print(f"\n📊 TOP 3 CANDIDATOS:")
-    for i, cand in enumerate(candidates[:3]):
-        print(f"   {i+1}. Área={cand['area']}, Ratio={cand['ratio']:.2f}, Edges={cand['edges']:.3f}, Score={cand['score']:.3f}")
-    
-    # Seleccionar el mejor
-    best = candidates[0]
-    x, y, w, h = best['bbox']
-    
-    print(f"\n✅ PLACA DETECTADA:")
-    print(f"   📍 Posición: x={x}, y={y}")
-    print(f"   📏 Tamaño: {w}x{h}px (área={best['area']})")
-    print(f"   📐 Aspect ratio: {best['ratio']:.2f} (ideal: 2.0-4.5)")
-    print(f"   🎯 Score: {best['score']:.3f}")
-    
-    # Márgenes moderados
-    margin_x = int(w * 0.08)  # 8% del ancho
-    margin_y = int(h * 0.12)  # 12% del alto
-    
-    x = max(0, x - margin_x)
-    y = max(0, y - margin_y)
-    w = min(img.shape[1] - x, w + 2*margin_x)
-    h = min(img.shape[0] - y, h + 2*margin_y)
-    
-    plate = img[y:y+h, x:x+w]
-    
-    # Debug con solo top 3
-    debug_img = img.copy()
-    for idx, cand in enumerate(candidates[:3]):
-        cx, cy, cw, ch = cand['bbox']
-        if idx == 0:
-            color = (0, 255, 0)  # Verde - seleccionado
-            thickness = 3
-        elif idx == 1:
-            color = (0, 165, 255)  # Naranja - segundo lugar
-            thickness = 2
-        else:
-            color = (255, 0, 0)  # Rojo - tercer lugar
-            thickness = 2
-        cv2.rectangle(debug_img, (cx, cy), (cx+cw, cy+ch), color, thickness)
-        cv2.putText(debug_img, f"#{idx+1}", (cx, cy-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-    cv2.imwrite("debug_detection.jpg", debug_img)
-    print(f"💾 Debug: debug_detection.jpg\n")
-    
-    cv2.imwrite(output_path, plate)
-    
-    return output_path
-
-
-def corregir_rotacion(img):
-    """
-    MEJORA 6: Detecta y corrige la rotación de la placa
-    """
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
-    
-    # Detectar bordes
-    edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-    
-    # Detectar líneas con Hough Transform
-    lines = cv2.HoughLines(edges, 1, np.pi/180, threshold=100)
-    
-    if lines is not None and len(lines) > 0:
-        # Calcular ángulo promedio de las líneas
-        angles = []
-        for rho, theta in lines[:10]:  # Tomar las 10 líneas más fuertes
-            angle = np.degrees(theta) - 90
-            if -45 < angle < 45:  # Filtrar ángulos razonables
-                angles.append(angle)
-        
-        if angles:
-            median_angle = np.median(angles)
-            
-            # Solo rotar si el ángulo es significativo
-            if abs(median_angle) > 2:
-                print(f"🔄 Corrigiendo rotación: {median_angle:.2f}°")
-                h, w = gray.shape
-                center = (w // 2, h // 2)
-                M = cv2.getRotationMatrix2D(center, median_angle, 1.0)
-                img = cv2.warpAffine(img, M, (w, h), 
-                                     flags=cv2.INTER_CUBIC,
-                                     borderMode=cv2.BORDER_REPLICATE)
-    
-    return img
-
-
-def preprocesar_placa(ruta_imagen):
-    """
-    MEJORA 7: Múltiples técnicas de preprocesamiento
-    OPTIMIZADO PARA PLACAS AZULES CON TEXTO NEGRO
-    """
-    img = cv2.imread(ruta_imagen)
-    if img is None:
-        return None
-
-    # Corregir rotación primero
-    img = corregir_rotacion(img)
-    
-    height, width = img.shape[:2]
-
-    # Recortar bordes conservadoramente
-    crop_top = int(height * 0.15)
-    crop_bottom = int(height * 0.85)
-    crop_left = int(width * 0.05)
-    crop_right = int(width * 0.95)
-    img = img[crop_top:crop_bottom, crop_left:crop_right]
-
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    
-    # MEJORA ESPECIAL: Para placas azules, invertir puede ayudar
-    # Detectar si es placa azul (fondo oscuro)
-    mean_intensity = np.mean(gray)
-    es_fondo_oscuro = mean_intensity < 100
-    
-    if es_fondo_oscuro:
-        print("🔵 Placa con fondo oscuro detectada (azul), invirtiendo colores...")
-        gray = 255 - gray
-    
-    # MEJORA 8: Resize más agresivo (4x para placas difíciles)
-    gray = cv2.resize(gray, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
-
-    # MEJORA 9: Ecualización adaptativa MÁS suave para no perder detalles
-    clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
-    enhanced = clahe.apply(gray)
-
-    # MEJORA 10: Denoise más agresivo para placas ruidosas
-    denoised = cv2.fastNlMeansDenoising(enhanced, None, h=15, templateWindowSize=7, searchWindowSize=21)
-    
-    # Suavizado muy ligero
-    denoised = cv2.GaussianBlur(denoised, (3, 3), 0)
-
-    # MEJORA 11: Probar múltiples técnicas de binarización
-    results = []
-    
-    # Técnica 1: Adaptive MEAN (de p.py) - más agresiva
-    thresh1 = cv2.adaptiveThreshold(
-        denoised, 255,
-        cv2.ADAPTIVE_THRESH_MEAN_C,
-        cv2.THRESH_BINARY,
-        25, 10  # Aumentado para placas con más contraste
-    )
-    
-    # Técnica 2: Adaptive GAUSSIAN
-    thresh2 = cv2.adaptiveThreshold(
-        denoised, 255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY,
-        25, 10
-    )
-    
-    # Técnica 3: OTSU directo
-    _, thresh3 = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    
-    # Técnica 4: Umbral fijo alto (para placas con buen contraste)
-    _, thresh4 = cv2.threshold(denoised, 150, 255, cv2.THRESH_BINARY)
-    
-    # MEJORA 12: Morphología para cada técnica
-    kernel = np.ones((2, 2), np.uint8)
-    
-    for thresh in [thresh1, thresh2, thresh3, thresh4]:
-        # Aplicar CLOSE para reparar caracteres
-        processed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-        
-        # Eliminar ruido pequeño
-        inv = 255 - processed
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(inv, connectivity=8)
-        
-        cleaned = np.zeros_like(inv)
-        for i in range(1, num_labels):
-            area = stats[i, cv2.CC_STAT_AREA]
-            if 50 <= area <= 8000:  # Rango más amplio para caracteres grandes
-                cleaned[labels == i] = 255
-        
-        cleaned = 255 - cleaned
-        results.append(cleaned)
-    
-    # Guardar las versiones para probarlas con OCR
-    for idx, result in enumerate(results):
-        output_path = f"placa_procesada_{idx}.png"
-        cv2.imwrite(output_path, result)
-    
-    return results  # Retornar lista de imágenes procesadas
-
-
-def corregir_caracter_inteligente(texto, posicion):
-    """
-    MEJORA 13: Corrección de caracteres según posición
-    Formato mexicano: AAA000A
-    Posiciones 0-2: Solo letras
-    Posiciones 3-5: Solo números
-    Posición 6: Solo letra
-    """
-    correcciones_a_numero = {
-        'O': '0', 'I': '1', 'L': '1', 'Z': '2', 
-        'S': '5', 'B': '8', 'G': '6', 'Q': '0'
-    }
-    
-    correcciones_a_letra = {
-        '0': 'O', '1': 'I', '2': 'Z', '5': 'S', 
-        '8': 'B', '6': 'G'
-    }
-    
-    if posicion in [0, 1, 2, 6]:  # Posiciones de letras
-        if texto in correcciones_a_letra:
-            return correcciones_a_letra[texto]
-    elif posicion in [3, 4, 5]:  # Posiciones de números
-        if texto in correcciones_a_numero:
-            return correcciones_a_numero[texto]
-    
-    return texto
-
-
-def limpiar_texto_placa_inteligente(texto):
-    """
-    MEJORA 14: Limpieza y corrección inteligente
-    Soporta formatos: AAA000A y AAA-000-A
+    Limpia el texto detectado para que parezca placa mexicana
     """
     if not texto:
         return None
     
-    # Remover solo espacios y caracteres especiales EXCEPTO guiones
+    # Remover espacios y caracteres raros
     texto = re.sub(r'[^A-Z0-9\-]', '', texto.upper())
     
-    if len(texto) < 6:
-        return None
+    # Correcciones comunes
+    correcciones = {
+        'O': '0', 'I': '1', 'L': '1', 'S': '5', 
+        'Z': '2', 'B': '8', 'G': '6'
+    }
     
-    # Normalizar formato con guiones: DTZ-049-A o DTZ049A
-    # Primero intentar detectar formato con guiones
-    patron_guion = r'[A-Z]{3}\-?\d{3}\-?[A-Z]'
-    match = re.search(patron_guion, texto)
-    if match:
-        texto = match.group(0)
-    
-    # Si es muy largo y no tiene guiones, intentar formato sin guiones
-    if len(texto) > 9:
-        patron_sin_guion = r'[A-Z]{3}\d{3}[A-Z]'
-        match = re.search(patron_sin_guion, texto)
+    # Si tiene 7+ caracteres, intentar formato AAA000A
+    if len(texto) >= 7:
+        # Buscar patrón
+        match = re.search(r'[A-Z]{3}[\-]?\d{3}[\-]?[A-Z]', texto)
         if match:
-            texto = match.group(0)
-        else:
-            texto = texto[:9]  # Tomar hasta 9 caracteres (con guiones)
+            return match.group(0)
     
-    # Remover guiones para corrección de caracteres
-    texto_sin_guiones = texto.replace('-', '')
+    # Aplicar correcciones básicas
+    if len(texto) >= 6:
+        resultado = ''
+        for i, char in enumerate(texto[:7]):
+            # Posiciones 0-2 y 6 deben ser letras
+            if i in [0, 1, 2, 6] and char.isdigit():
+                # Convertir número a letra
+                if char in ['0']: resultado += 'O'
+                elif char in ['1']: resultado += 'I'
+                elif char in ['5']: resultado += 'S'
+                elif char in ['8']: resultado += 'B'
+                else: resultado += char
+            # Posiciones 3-5 deben ser números
+            elif i in [3, 4, 5] and char.isalpha():
+                # Convertir letra a número
+                if char in correcciones:
+                    resultado += correcciones[char]
+                else:
+                    resultado += char
+            else:
+                resultado += char
+        return resultado
     
-    # Aplicar correcciones según posición
-    texto_corregido = ''
-    for i, char in enumerate(texto_sin_guiones[:7]):
-        if i < 7:
-            texto_corregido += corregir_caracter_inteligente(char, i)
-        else:
-            break
-    
-    # Si el texto original tenía guiones, agregarlos de vuelta
-    if '-' in texto:
-        # Formato: AAA-000-A
-        if len(texto_corregido) >= 7:
-            texto_corregido = f"{texto_corregido[:3]}-{texto_corregido[3:6]}-{texto_corregido[6]}"
-        elif len(texto_corregido) >= 6:
-            texto_corregido = f"{texto_corregido[:3]}-{texto_corregido[3:6]}"
-    
-    return texto_corregido
+    return texto if len(texto) >= 4 else None
 
 
-def validar_formato_placa(texto):
+def validar_placa(texto):
     """
-    Valida formato de placa mexicana: AAA000A o AAA-000-A
+    Valida que parezca placa mexicana
     """
     if not texto or len(texto) < 6:
         return False
     
-    # Formato sin guiones: AAA000A
+    # Formato con o sin guiones: AAA000A o AAA-000-A
     patron1 = r'^[A-Z]{3}\d{3}[A-Z]?$'
-    # Formato con guiones: AAA-000-A
     patron2 = r'^[A-Z]{3}\-\d{3}\-[A-Z]?$'
     
     return bool(re.match(patron1, texto)) or bool(re.match(patron2, texto))
-
-
-def leer_placa(rutas_imagenes):
-    """
-    MEJORA 15: Lee múltiples versiones y elige la mejor
-    """
-    try:
-        todos_resultados = []
-        
-        # Si es string, convertir a lista
-        if isinstance(rutas_imagenes, str):
-            rutas_imagenes = [rutas_imagenes]
-        elif not isinstance(rutas_imagenes, list):
-            return None
-        
-        # Configuraciones de Tesseract a probar
-        configs = [
-            # Incluir guión en whitelist
-            '--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
-            '--oem 3 --psm 8 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
-            '--oem 3 --psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
-            '--oem 3 --psm 13 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
-        ]
-        
-        # Probar cada imagen procesada
-        for ruta in rutas_imagenes:
-            if not os.path.exists(ruta):
-                continue
-                
-            img = Image.open(ruta)
-            
-            # Probar cada configuración
-            for config in configs:
-                texto = pytesseract.image_to_string(img, config=config)
-                texto_limpio = limpiar_texto_placa_inteligente(texto)
-                
-                if texto_limpio and len(texto_limpio) >= 6:
-                    # Calcular score de calidad
-                    score = len(texto_limpio)
-                    if validar_formato_placa(texto_limpio):
-                        score += 10  # Bonus si cumple formato perfecto
-                    
-                    todos_resultados.append({
-                        'texto': texto_limpio,
-                        'score': score,
-                        'valido': validar_formato_placa(texto_limpio)
-                    })
-        
-        if not todos_resultados:
-            return None
-        
-        # MEJORA 16: Ordenar por score y validez
-        todos_resultados = sorted(todos_resultados, key=lambda x: (x['valido'], x['score']), reverse=True)
-        
-        # Tomar el mejor resultado
-        mejor = todos_resultados[0]
-        print(f"✅ Mejor resultado: {mejor['texto']} (válido: {mejor['valido']}, score: {mejor['score']})")
-        
-        # Si los primeros 3 resultados coinciden, es más confiable
-        if len(todos_resultados) >= 3:
-            top3 = [r['texto'] for r in todos_resultados[:3]]
-            if top3[0] == top3[1] or top3[0] == top3[2]:
-                print("🎯 Alta confianza: múltiples coincidencias")
-        
-        return mejor['texto']
-        
-    except Exception as e:
-        print(f"❌ Error en OCR: {e}")
-        return None
 
 
 @app.route('/detect', methods=['POST'])
@@ -524,74 +89,73 @@ def detect():
         
         temp_input = f"temp_input_{datetime.now().timestamp()}.jpg"
         file.save(temp_input)
-
-        # MEJORA 17: Verificar calidad de imagen primero (OPCIONAL - comentar si falla mucho)
-        print("🔍 Verificando calidad de imagen...")
-        calidad_ok, mensaje_calidad = evaluar_calidad_imagen(temp_input)
         
-        if not calidad_ok:
-            print(f"⚠️ {mensaje_calidad} - CONTINUANDO DE TODAS FORMAS...")
-            # NO rechazamos, solo advertimos
-            # os.remove(temp_input)
-            # return jsonify({
-            #     'success': False,
-            #     'message': f'Imagen de mala calidad: {mensaje_calidad}'
-            # })
-
-        print("🔍 Paso 1: Detectando región de placa con técnicas mejoradas...")
-        plate_path = detect_plate(temp_input, "temp_plate.jpg")
+        print(f"📸 Procesando imagen con EasyOCR...")
         
-        if not plate_path:
-            os.remove(temp_input)
+        # Leer imagen
+        img = cv2.imread(temp_input)
+        
+        # EasyOCR funciona mejor con imágenes no muy grandes
+        height, width = img.shape[:2]
+        if width > 1280:
+            scale = 1280 / width
+            img = cv2.resize(img, None, fx=scale, fy=scale)
+        
+        # Detectar TODO el texto en la imagen
+        results = reader.readtext(img)
+        
+        print(f"🔍 Textos detectados: {len(results)}")
+        
+        # Buscar el que más parezca placa
+        candidatos = []
+        for (bbox, text, confidence) in results:
+            texto_limpio = limpiar_placa(text)
+            
+            if texto_limpio and len(texto_limpio) >= 6:
+                es_valido = validar_placa(texto_limpio)
+                
+                # Calcular score
+                score = confidence
+                if es_valido:
+                    score += 0.5  # Bonus por formato válido
+                if len(texto_limpio) == 7:
+                    score += 0.2  # Bonus por longitud correcta
+                
+                candidatos.append({
+                    'texto': texto_limpio,
+                    'confianza': confidence,
+                    'score': score,
+                    'valido': es_valido,
+                    'original': text
+                })
+                
+                print(f"   📋 '{text}' → '{texto_limpio}' (conf: {confidence:.2f}, válido: {es_valido})")
+        
+        # Limpiar archivo temporal
+        os.remove(temp_input)
+        
+        if not candidatos:
+            print("❌ No se detectó ninguna placa")
             return jsonify({
                 'success': False,
                 'message': 'No se detectó placa en la imagen'
             })
-
-        print("🔧 Paso 2: Preprocesando con múltiples técnicas...")
-        processed_images = preprocesar_placa(plate_path)
         
-        if not processed_images:
-            os.remove(temp_input)
-            os.remove(plate_path)
-            return jsonify({
-                'success': False,
-                'message': 'Error al procesar la placa'
-            })
-
-        # Crear lista de rutas (ahora son 4 técnicas)
-        processed_paths = [f"placa_procesada_{i}.png" for i in range(4)]
-
-        print("📖 Paso 3: Leyendo con OCR ultra-optimizado...")
-        plate_text = leer_placa(processed_paths)
+        # Ordenar por score
+        candidatos = sorted(candidatos, key=lambda x: x['score'], reverse=True)
+        mejor = candidatos[0]
         
-        # Limpiar archivos temporales
-        os.remove(temp_input)
-        os.remove(plate_path)
-        for path in processed_paths:
-            if os.path.exists(path):
-                os.remove(path)
+        print(f"✅ MEJOR CANDIDATO: {mejor['texto']} (score: {mejor['score']:.2f})")
         
-        if not plate_text:
-            return jsonify({
-                'success': False,
-                'message': 'No se pudo leer el texto de la placa'
-            })
-
-        # Confianza basada en validación
-        confidence = 0.98 if validar_formato_placa(plate_text) else 0.70
-
-        print(f"✅ Detección exitosa: {plate_text} (confianza: {confidence})")
-
         return jsonify({
             'success': True,
-            'plate': plate_text,
-            'confidence': confidence,
+            'plate': mejor['texto'],
+            'confidence': mejor['score'],
             'timestamp': datetime.now().isoformat()
         })
-
+        
     except Exception as e:
-        print(f"❌ Error en detección: {e}")
+        print(f"❌ Error: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({
@@ -603,29 +167,20 @@ def detect():
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({
-        'status': 'ok', 
-        'message': 'API de detección ULTRA-MEJORADA funcionando',
-        'improvements': [
-            'Detección multi-técnica con scoring',
-            'Corrección automática de rotación',
-            'Preprocesamiento con 3 técnicas diferentes',
-            'Resize 3x para mejor precisión',
-            'OCR con múltiples configuraciones',
-            'Corrección inteligente por posición',
-            'Validación estricta de formato'
+        'status': 'ok',
+        'message': 'API con EasyOCR funcionando',
+        'engine': 'EasyOCR (Deep Learning)',
+        'ventajas': [
+            'No requiere detección de región',
+            'Funciona con fotos borrosas',
+            'Robusto a iluminación',
+            'Detecta texto automáticamente'
         ]
     })
 
 
 if __name__ == '__main__':
-    print("🚀 Iniciando API de detección de placas ULTRA-MEJORADA")
-    print("🔍 Servidor corriendo en http://localhost:5000")
-    print("✨ MEJORAS ADICIONALES:")
-    print("   1. Detección multi-técnica con scoring inteligente")
-    print("   2. Corrección automática de rotación")
-    print("   3. 3 técnicas de binarización (MEAN, GAUSSIAN, OTSU)")
-    print("   4. Resize 3x para mayor precisión")
-    print("   5. 4 configuraciones de Tesseract (PSM 6,7,8,13)")
-    print("   6. Corrección de caracteres según posición")
-    print("   7. Validación estricta con scoring")
+    print("🚀 API de detección con EasyOCR")
+    print("🔍 Servidor en http://localhost:5000")
+    print("✨ EasyOCR es MUCHO más robusto que Tesseract")
     app.run(host='0.0.0.0', port=5000, debug=True)
