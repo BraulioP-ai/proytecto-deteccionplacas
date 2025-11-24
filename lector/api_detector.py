@@ -15,7 +15,7 @@ CORS(app)
 def evaluar_calidad_imagen(image_path):
     """
     MEJORA 17: Evaluar si la imagen tiene buena calidad para OCR
-    Detecta: desenfoque, sobreexposición, subexposición
+    VERSIÓN MUY RELAJADA - Solo rechaza casos extremos
     """
     img = cv2.imread(image_path)
     if img is None:
@@ -23,24 +23,27 @@ def evaluar_calidad_imagen(image_path):
     
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     
-    # 1. Detectar desenfoque con Laplacian
+    # 1. Detectar desenfoque con Laplacian (MUY RELAJADO)
     laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
-    if laplacian_var < 50:
-        return False, f"Imagen muy borrosa (score: {laplacian_var:.1f})"
+    print(f"🔍 Desenfoque: {laplacian_var:.1f} (mínimo: 10)")
+    if laplacian_var < 10:  # Bajado de 50 a 10
+        return False, f"Imagen MUY borrosa (score: {laplacian_var:.1f})"
     
-    # 2. Detectar sobreexposición/subexposición
+    # 2. Detectar sobreexposición/subexposición (MUY RELAJADO)
     mean_brightness = np.mean(gray)
-    if mean_brightness < 30:
-        return False, f"Imagen muy oscura (brillo: {mean_brightness:.1f})"
-    if mean_brightness > 225:
-        return False, f"Imagen muy brillante (brillo: {mean_brightness:.1f})"
+    print(f"💡 Brillo: {mean_brightness:.1f} (rango: 15-240)")
+    if mean_brightness < 15:  # Bajado de 30 a 15
+        return False, f"Imagen MUY oscura (brillo: {mean_brightness:.1f})"
+    if mean_brightness > 240:  # Subido de 225 a 240
+        return False, f"Imagen MUY brillante (brillo: {mean_brightness:.1f})"
     
-    # 3. Verificar contraste
+    # 3. Verificar contraste (MUY RELAJADO)
     std_brightness = np.std(gray)
-    if std_brightness < 20:
-        return False, f"Poco contraste (std: {std_brightness:.1f})"
+    print(f"📊 Contraste: {std_brightness:.1f} (mínimo: 10)")
+    if std_brightness < 10:  # Bajado de 20 a 10
+        return False, f"Muy poco contraste (std: {std_brightness:.1f})"
     
-    print(f"✅ Calidad OK: desenfoque={laplacian_var:.1f}, brillo={mean_brightness:.1f}, contraste={std_brightness:.1f}")
+    print(f"✅ Calidad ACEPTABLE: desenfoque={laplacian_var:.1f}, brillo={mean_brightness:.1f}, contraste={std_brightness:.1f}")
     return True, "Buena calidad"
 
 
@@ -157,9 +160,14 @@ def detect_plate(image_path, output_path="plate_detected.jpg"):
                     'ratio': aspect_ratio,
                     'edges': 0.0
                 })
+                
+        print(f"🔍 Candidatos encontrados con fallback: {len(candidates)}")
+    else:
+        print(f"✅ Candidatos encontrados: {len(candidates)}")
     
     if not candidates:
-        print("❌ No se encontraron candidatos válidos")
+        print("❌ No se encontraron candidatos válidos en NINGÚN modo")
+        print(f"   Total de contornos analizados: {len(contours)}")
         return None
     
     # MEJORA 4: Ordenar por score
@@ -501,17 +509,18 @@ def detect():
         temp_input = f"temp_input_{datetime.now().timestamp()}.jpg"
         file.save(temp_input)
 
-        # MEJORA 17: Verificar calidad de imagen primero
+        # MEJORA 17: Verificar calidad de imagen primero (OPCIONAL - comentar si falla mucho)
         print("🔍 Verificando calidad de imagen...")
         calidad_ok, mensaje_calidad = evaluar_calidad_imagen(temp_input)
         
         if not calidad_ok:
-            print(f"⚠️ {mensaje_calidad}")
-            os.remove(temp_input)
-            return jsonify({
-                'success': False,
-                'message': f'Imagen de mala calidad: {mensaje_calidad}'
-            })
+            print(f"⚠️ {mensaje_calidad} - CONTINUANDO DE TODAS FORMAS...")
+            # NO rechazamos, solo advertimos
+            # os.remove(temp_input)
+            # return jsonify({
+            #     'success': False,
+            #     'message': f'Imagen de mala calidad: {mensaje_calidad}'
+            # })
 
         print("🔍 Paso 1: Detectando región de placa con técnicas mejoradas...")
         plate_path = detect_plate(temp_input, "temp_plate.jpg")
