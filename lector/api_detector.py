@@ -49,8 +49,8 @@ def evaluar_calidad_imagen(image_path):
 
 def detect_plate(image_path, output_path="plate_detected.jpg"):
     """
-    Detecta y recorta la región de la placa - VERSIÓN ULTRA LAXA
-    Acepta casi cualquier rectángulo que parezca una placa
+    Detecta y recorta la región de la placa - VERSIÓN BALANCEADA
+    Busca rectángulos que realmente parezcan placas mexicanas
     """
     img = cv2.imread(image_path)
     if img is None:
@@ -66,137 +66,125 @@ def detect_plate(image_path, output_path="plate_detected.jpg"):
     
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     
-    # Ecualización AGRESIVA
-    clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8,8))
+    # Ecualización moderada
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
     gray = clahe.apply(gray)
     
-    # MÚLTIPLES técnicas de detección de bordes (MUY SENSIBLES)
+    # Técnicas de detección de bordes BALANCEADAS
     blur1 = cv2.bilateralFilter(gray, 11, 17, 17)
-    edges1 = cv2.Canny(blur1, 10, 100)  # Umbrales MUY bajos
+    edges1 = cv2.Canny(blur1, 30, 180)
     
     blur2 = cv2.GaussianBlur(gray, (5,5), 0)
-    edges2 = cv2.Canny(blur2, 20, 150)
+    edges2 = cv2.Canny(blur2, 40, 200)
     
-    # Morph Gradient
-    kernel_grad = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    gradient = cv2.morphologyEx(gray, cv2.MORPH_GRADIENT, kernel_grad)
-    _, edges3 = cv2.threshold(gradient, 30, 255, cv2.THRESH_BINARY)  # Umbral bajo
-    
-    # Combinar TODO
+    # Combinar
     edges = cv2.bitwise_or(edges1, edges2)
-    edges = cv2.bitwise_or(edges, edges3)
     
-    # Dilatación AGRESIVA
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 5))  # Kernel más grande
-    edges = cv2.dilate(edges, kernel, iterations=3)  # Más iteraciones
+    # Dilatación moderada
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (4, 3))
+    edges = cv2.dilate(edges, kernel, iterations=2)
 
     contours, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)[:100]  # TOP 100
+    contours = sorted(contours, key=cv2.contourArea, reverse=True)[:40]
 
-    print(f"🔍 Total de contornos encontrados: {len(contours)}")
+    print(f"🔍 Analizando {len(contours)} contornos...")
 
     candidates = []
 
-    # FILTROS EXTREMADAMENTE LAXOS
-    for idx, cnt in enumerate(contours):
+    for cnt in contours:
         perimeter = cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, 0.03 * perimeter, True)  # Más tolerante
+        approx = cv2.approxPolyDP(cnt, 0.02 * perimeter, True)
 
-        # Aceptar formas de 4 a 10 lados
-        if len(approx) >= 4 and len(approx) <= 10:
+        # Aceptar formas de 4 a 8 lados
+        if len(approx) >= 4 and len(approx) <= 8:
             x, y, w, h = cv2.boundingRect(cnt)
             
             aspect_ratio = w / float(h) if h > 0 else 0
             area = w * h
             
-            # FILTROS ULTRA LAXOS
-            max_area = (width * height) * 0.7  # Hasta 70% de la imagen
-            min_area = 800  # Área mínima MUY baja
+            # Calcular densidad de bordes
+            roi_edges = edges[y:y+h, x:x+w]
+            edge_density = np.sum(roi_edges > 0) / (w * h) if (w * h) > 0 else 0
             
-            # Aceptar aspect ratios de 1.0 a 8.0 (casi cualquier rectángulo horizontal)
-            if (1.0 < aspect_ratio < 8.0 and 
+            # FILTROS BALANCEADOS - Específicos para placas mexicanas
+            max_area = (width * height) * 0.4  # Máximo 40% de imagen
+            min_area = 3000 if width > 800 else 1500  # Área mínima razonable
+            
+            # Aspect ratio de placas mexicanas: entre 2.0 y 4.5
+            # Con decoración pueden llegar a 5.0
+            if (2.0 < aspect_ratio < 5.0 and 
                 min_area < area < max_area and 
-                h > 5 and w > 30):  # Mínimos muy bajos
+                h > 20 and w > 60 and  # Mínimos realistas
+                edge_density > 0.08):  # Debe tener suficientes bordes
                 
-                # Calcular densidad de bordes
-                roi_edges = edges[y:y+h, x:x+w]
-                edge_density = np.sum(roi_edges > 0) / (w * h) if (w * h) > 0 else 0
+                # Score balanceado
+                ratio_ideal = 3.3  # Ratio típico de placas mexicanas
+                ratio_score = 1 / (1 + abs(aspect_ratio - ratio_ideal) * 0.8)
+                area_score = min(area / 8000, 1.2)
+                position_score = max(0.3, 1 - (y / height))  # No penalizar mucho posición
+                edge_score = min(edge_density * 8, 1.0)
                 
-                # Score simple - priorizar área grande y ratio cercano a 3
-                ratio_ideal = 3.5
-                ratio_score = 1 / (1 + abs(aspect_ratio - ratio_ideal) * 0.5)  # Menos penalización
-                area_score = min(area / 8000, 1.5)
-                position_score = 1 - (y / height) * 0.5  # Menos peso a posición
-                edge_score = min(edge_density * 5, 1.0)
-                
-                total_score = (area_score * 0.5) + (ratio_score * 0.2) + (position_score * 0.1) + (edge_score * 0.2)
+                total_score = (area_score * 0.4) + (ratio_score * 0.3) + (edge_score * 0.2) + (position_score * 0.1)
                 
                 candidates.append({
                     'bbox': (x, y, w, h),
                     'score': total_score,
                     'area': area,
                     'ratio': aspect_ratio,
-                    'edges': edge_density,
-                    'index': idx
+                    'edges': edge_density
                 })
 
+    # Si no hay candidatos, relajar un POCO (no mucho)
     if not candidates:
-        print("⚠️ No se encontraron candidatos - Aplicando FALLBACK EXTREMO...")
+        print("⚠️ Sin candidatos estrictos, relajando filtros moderadamente...")
         
-        # FALLBACK EXTREMO: Tomar los 10 rectángulos más grandes
-        for idx, cnt in enumerate(contours[:20]):
+        for cnt in contours[:25]:
             x, y, w, h = cv2.boundingRect(cnt)
             aspect_ratio = w / float(h) if h > 0 else 0
             area = w * h
             
-            # Solo verificar que sea horizontal y tenga área mínima
-            if aspect_ratio > 1.0 and area > 500:
+            # Filtros relajados PERO sensatos
+            if (1.8 < aspect_ratio < 5.5 and 
+                area > 2000 and 
+                h > 15 and w > 50):
+                
                 candidates.append({
                     'bbox': (x, y, w, h),
-                    'score': area / 3000,
+                    'score': area / 6000,
                     'area': area,
                     'ratio': aspect_ratio,
-                    'edges': 0.0,
-                    'index': idx
+                    'edges': 0.0
                 })
                 
-        print(f"🔍 Candidatos de fallback extremo: {len(candidates)}")
+        print(f"🔍 Candidatos con filtros relajados: {len(candidates)}")
     else:
-        print(f"✅ Candidatos iniciales: {len(candidates)}")
+        print(f"✅ Candidatos con filtros estrictos: {len(candidates)}")
     
     if not candidates:
-        print("❌ IMPOSIBLE encontrar candidatos - La imagen puede estar completamente vacía")
-        # Último recurso: tomar el centro de la imagen
-        center_w = int(width * 0.6)
-        center_h = int(height * 0.3)
-        center_x = int(width * 0.2)
-        center_y = int(height * 0.35)
-        
-        plate = img[center_y:center_y+center_h, center_x:center_x+center_w]
-        cv2.imwrite(output_path, plate)
-        print(f"⚠️ Usando región central como último recurso")
-        return output_path
+        print("❌ No se encontró ninguna región que parezca una placa")
+        return None
     
     # Ordenar por score
     candidates = sorted(candidates, key=lambda x: x['score'], reverse=True)
     
-    # Mostrar top 3 candidatos
+    # Mostrar top 3
     print(f"\n📊 TOP 3 CANDIDATOS:")
     for i, cand in enumerate(candidates[:3]):
         print(f"   {i+1}. Área={cand['area']}, Ratio={cand['ratio']:.2f}, Edges={cand['edges']:.3f}, Score={cand['score']:.3f}")
     
-    # Tomar el mejor
+    # Seleccionar el mejor
     best = candidates[0]
     x, y, w, h = best['bbox']
     
-    print(f"\n✅ SELECCIONADO: Candidato #{best['index']+1}")
-    print(f"   📍 Posición: x={x}, y={y}, w={w}, h={h}")
-    print(f"   📏 Área={best['area']}, Ratio={best['ratio']:.2f}")
-    print(f"   🎯 Score final={best['score']:.3f}")
+    print(f"\n✅ PLACA DETECTADA:")
+    print(f"   📍 Posición: x={x}, y={y}")
+    print(f"   📏 Tamaño: {w}x{h}px (área={best['area']})")
+    print(f"   📐 Aspect ratio: {best['ratio']:.2f} (ideal: 2.0-4.5)")
+    print(f"   🎯 Score: {best['score']:.3f}")
     
-    # Margen GENEROSO
-    margin_x = int(w * 0.15)  # 15% del ancho
-    margin_y = int(h * 0.2)   # 20% del alto
+    # Márgenes moderados
+    margin_x = int(w * 0.08)  # 8% del ancho
+    margin_y = int(h * 0.12)  # 12% del alto
     
     x = max(0, x - margin_x)
     y = max(0, y - margin_y)
@@ -205,16 +193,23 @@ def detect_plate(image_path, output_path="plate_detected.jpg"):
     
     plate = img[y:y+h, x:x+w]
     
-    # Guardar imagen de debug con TODOS los candidatos
+    # Debug con solo top 3
     debug_img = img.copy()
-    for idx, cand in enumerate(candidates[:5]):  # Top 5
+    for idx, cand in enumerate(candidates[:3]):
         cx, cy, cw, ch = cand['bbox']
-        color = (0, 255, 0) if idx == 0 else (0, 165, 255)  # Verde el mejor, naranja los demás
-        thickness = 4 if idx == 0 else 2
+        if idx == 0:
+            color = (0, 255, 0)  # Verde - seleccionado
+            thickness = 3
+        elif idx == 1:
+            color = (0, 165, 255)  # Naranja - segundo lugar
+            thickness = 2
+        else:
+            color = (255, 0, 0)  # Rojo - tercer lugar
+            thickness = 2
         cv2.rectangle(debug_img, (cx, cy), (cx+cw, cy+ch), color, thickness)
-        cv2.putText(debug_img, f"#{idx+1}", (cx, cy-10), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+        cv2.putText(debug_img, f"#{idx+1}", (cx, cy-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
     cv2.imwrite("debug_detection.jpg", debug_img)
-    print(f"💾 Debug guardado en: debug_detection.jpg")
+    print(f"💾 Debug: debug_detection.jpg\n")
     
     cv2.imwrite(output_path, plate)
     
