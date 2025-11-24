@@ -151,6 +151,7 @@ def corregir_rotacion(img):
 def preprocesar_placa(ruta_imagen):
     """
     MEJORA 7: Múltiples técnicas de preprocesamiento
+    OPTIMIZADO PARA PLACAS AZULES CON TEXTO NEGRO
     """
     img = cv2.imread(ruta_imagen)
     if img is None:
@@ -162,36 +163,45 @@ def preprocesar_placa(ruta_imagen):
     height, width = img.shape[:2]
 
     # Recortar bordes conservadoramente
-    crop_top = int(height * 0.1)
-    crop_bottom = int(height * 0.9)
-    crop_left = int(width * 0.02)
-    crop_right = int(width * 0.98)
+    crop_top = int(height * 0.15)
+    crop_bottom = int(height * 0.85)
+    crop_left = int(width * 0.05)
+    crop_right = int(width * 0.95)
     img = img[crop_top:crop_bottom, crop_left:crop_right]
 
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     
-    # MEJORA 8: Resize más agresivo (3x en lugar de 2x)
-    gray = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+    # MEJORA ESPECIAL: Para placas azules, invertir puede ayudar
+    # Detectar si es placa azul (fondo oscuro)
+    mean_intensity = np.mean(gray)
+    es_fondo_oscuro = mean_intensity < 100
+    
+    if es_fondo_oscuro:
+        print("🔵 Placa con fondo oscuro detectada (azul), invirtiendo colores...")
+        gray = 255 - gray
+    
+    # MEJORA 8: Resize más agresivo (4x para placas difíciles)
+    gray = cv2.resize(gray, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
 
-    # MEJORA 9: Ecualización adaptativa más suave
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    # MEJORA 9: Ecualización adaptativa MÁS suave para no perder detalles
+    clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
     enhanced = clahe.apply(gray)
 
-    # MEJORA 10: Denoise antes de binarizar
-    denoised = cv2.fastNlMeansDenoising(enhanced, None, h=10, templateWindowSize=7, searchWindowSize=21)
+    # MEJORA 10: Denoise más agresivo para placas ruidosas
+    denoised = cv2.fastNlMeansDenoising(enhanced, None, h=15, templateWindowSize=7, searchWindowSize=21)
     
-    # Suavizado ligero
+    # Suavizado muy ligero
     denoised = cv2.GaussianBlur(denoised, (3, 3), 0)
 
     # MEJORA 11: Probar múltiples técnicas de binarización
     results = []
     
-    # Técnica 1: Adaptive MEAN (de p.py)
+    # Técnica 1: Adaptive MEAN (de p.py) - más agresiva
     thresh1 = cv2.adaptiveThreshold(
         denoised, 255,
         cv2.ADAPTIVE_THRESH_MEAN_C,
         cv2.THRESH_BINARY,
-        19, 9
+        25, 10  # Aumentado para placas con más contraste
     )
     
     # Técnica 2: Adaptive GAUSSIAN
@@ -199,16 +209,19 @@ def preprocesar_placa(ruta_imagen):
         denoised, 255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         cv2.THRESH_BINARY,
-        19, 9
+        25, 10
     )
     
-    # Técnica 3: OTSU
+    # Técnica 3: OTSU directo
     _, thresh3 = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # Técnica 4: Umbral fijo alto (para placas con buen contraste)
+    _, thresh4 = cv2.threshold(denoised, 150, 255, cv2.THRESH_BINARY)
     
     # MEJORA 12: Morphología para cada técnica
     kernel = np.ones((2, 2), np.uint8)
     
-    for thresh in [thresh1, thresh2, thresh3]:
+    for thresh in [thresh1, thresh2, thresh3, thresh4]:
         # Aplicar CLOSE para reparar caracteres
         processed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
         
@@ -219,18 +232,18 @@ def preprocesar_placa(ruta_imagen):
         cleaned = np.zeros_like(inv)
         for i in range(1, num_labels):
             area = stats[i, cv2.CC_STAT_AREA]
-            if 30 <= area <= 5000:  # Filtro de área más estricto
+            if 50 <= area <= 8000:  # Rango más amplio para caracteres grandes
                 cleaned[labels == i] = 255
         
         cleaned = 255 - cleaned
         results.append(cleaned)
     
-    # Guardar las 3 versiones para probarlas con OCR
+    # Guardar las versiones para probarlas con OCR
     for idx, result in enumerate(results):
         output_path = f"placa_procesada_{idx}.png"
         cv2.imwrite(output_path, result)
     
-    return results  # Retornar lista de rutas
+    return results  # Retornar lista de imágenes procesadas
 
 
 def corregir_caracter_inteligente(texto, posicion):
@@ -264,46 +277,68 @@ def corregir_caracter_inteligente(texto, posicion):
 def limpiar_texto_placa_inteligente(texto):
     """
     MEJORA 14: Limpieza y corrección inteligente
+    Soporta formatos: AAA000A y AAA-000-A
     """
     if not texto:
         return None
     
-    # Remover espacios y caracteres especiales
-    texto = re.sub(r'[^A-Z0-9]', '', texto.upper())
+    # Remover solo espacios y caracteres especiales EXCEPTO guiones
+    texto = re.sub(r'[^A-Z0-9\-]', '', texto.upper())
     
     if len(texto) < 6:
         return None
     
-    # Si es muy largo, intentar extraer 7 caracteres válidos
-    if len(texto) > 7:
-        # Buscar patron AAA000A en el texto
-        patron = r'[A-Z]{3}[0-9]{3}[A-Z]'
-        match = re.search(patron, texto)
+    # Normalizar formato con guiones: DTZ-049-A o DTZ049A
+    # Primero intentar detectar formato con guiones
+    patron_guion = r'[A-Z]{3}\-?\d{3}\-?[A-Z]'
+    match = re.search(patron_guion, texto)
+    if match:
+        texto = match.group(0)
+    
+    # Si es muy largo y no tiene guiones, intentar formato sin guiones
+    if len(texto) > 9:
+        patron_sin_guion = r'[A-Z]{3}\d{3}[A-Z]'
+        match = re.search(patron_sin_guion, texto)
         if match:
             texto = match.group(0)
         else:
-            texto = texto[:7]
+            texto = texto[:9]  # Tomar hasta 9 caracteres (con guiones)
+    
+    # Remover guiones para corrección de caracteres
+    texto_sin_guiones = texto.replace('-', '')
     
     # Aplicar correcciones según posición
     texto_corregido = ''
-    for i, char in enumerate(texto[:7]):
+    for i, char in enumerate(texto_sin_guiones[:7]):
         if i < 7:
             texto_corregido += corregir_caracter_inteligente(char, i)
         else:
             break
+    
+    # Si el texto original tenía guiones, agregarlos de vuelta
+    if '-' in texto:
+        # Formato: AAA-000-A
+        if len(texto_corregido) >= 7:
+            texto_corregido = f"{texto_corregido[:3]}-{texto_corregido[3:6]}-{texto_corregido[6]}"
+        elif len(texto_corregido) >= 6:
+            texto_corregido = f"{texto_corregido[:3]}-{texto_corregido[3:6]}"
     
     return texto_corregido
 
 
 def validar_formato_placa(texto):
     """
-    Valida formato de placa mexicana AAA000A
+    Valida formato de placa mexicana: AAA000A o AAA-000-A
     """
     if not texto or len(texto) < 6:
         return False
     
-    patron = r'^[A-Z]{3}\d{3}[A-Z]?$'
-    return bool(re.match(patron, texto))
+    # Formato sin guiones: AAA000A
+    patron1 = r'^[A-Z]{3}\d{3}[A-Z]?$'
+    # Formato con guiones: AAA-000-A
+    patron2 = r'^[A-Z]{3}\-\d{3}\-[A-Z]?$'
+    
+    return bool(re.match(patron1, texto)) or bool(re.match(patron2, texto))
 
 
 def leer_placa(rutas_imagenes):
@@ -321,10 +356,11 @@ def leer_placa(rutas_imagenes):
         
         # Configuraciones de Tesseract a probar
         configs = [
-            '--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
-            '--oem 3 --psm 8 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
-            '--oem 3 --psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
-            '--oem 3 --psm 13 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+            # Incluir guión en whitelist
+            '--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
+            '--oem 3 --psm 8 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
+            '--oem 3 --psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
+            '--oem 3 --psm 13 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
         ]
         
         # Probar cada imagen procesada
@@ -406,8 +442,8 @@ def detect():
                 'message': 'Error al procesar la placa'
             })
 
-        # Crear lista de rutas
-        processed_paths = [f"placa_procesada_{i}.png" for i in range(len(processed_images))]
+        # Crear lista de rutas (ahora son 4 técnicas)
+        processed_paths = [f"placa_procesada_{i}.png" for i in range(4)]
 
         print("📖 Paso 3: Leyendo con OCR ultra-optimizado...")
         plate_text = leer_placa(processed_paths)
