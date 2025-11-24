@@ -1,17 +1,21 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import FormData from "form-data";
+import fetch from "node-fetch";
 import { db } from "./db.js";
 
 dotenv.config();
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '50mb' })); // Aumentar límite para imágenes base64
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 app.use(
   cors({
-    origin: "http://localhost:5174",
+    origin: ["http://localhost:5173", "http://localhost:5174"],
     methods: ["GET", "POST", "PUT", "DELETE"],
+    credentials: true
   })
 );
 
@@ -23,7 +27,7 @@ app.get("/", (req, res) => {
 });
 
 // ==============================
-// LOGIN (texto plano, según tu BD real)
+// LOGIN
 // ==============================
 app.post("/login", (req, res) => {
   const { nombre, contrasena } = req.body;
@@ -50,22 +54,20 @@ app.post("/login", (req, res) => {
 
     const user = results[0];
 
-    // Comparación en texto plano
     if (user.ContrasenaHash !== contrasena) {
       return res.status(401).json({ message: "Contraseña incorrecta" });
     }
 
-    // Login correcto - ✅ AGREGADO PermisoID
     return res.json({
       UsuarioID: user.UsuarioID,
       NombreUsuario: user.NombreUsuario,
-      PermisoID: user.PermisoID  // ← NUEVO
+      PermisoID: user.PermisoID
     });
   });
 });
 
 // ==============================
-// OBTENER REGISTROS DE ACCESO (CON GUARDIA)
+// OBTENER REGISTROS DE ACCESO
 // ==============================
 app.get("/registros", (req, res) => {
   const query = `
@@ -95,6 +97,7 @@ app.get("/registros", (req, res) => {
     res.json(results);
   });
 });
+
 // ==============================
 // REGISTRO MANUAL DE ACCESO
 // ==============================
@@ -131,55 +134,6 @@ app.post("/acceso/manual", (req, res) => {
       res.json(rows[0]);
     });
   });
-});
-
-// ==============================
-// REGISTRO AUTOMÁTICO
-// ==============================
-app.post("/registros", (req, res) => {
-  const { placa, modo } = req.body;
-
-  if (!placa || !modo) {
-    return res.status(400).json({ message: "Faltan datos requeridos" });
-  }
-
-  const checkQuery = "SELECT EsAutorizado FROM Vehiculos WHERE Placa = ?";
-
-  db.query(checkQuery, [placa], (err, vehiculos) => {
-    if (err) {
-      console.error("❌ Error al verificar placa:", err);
-      return res.status(500).send("Error en la verificación");
-    }
-
-    let estado = "NO_RECONOCIDO";
-
-    if (vehiculos.length > 0) {
-      estado = vehiculos[0].EsAutorizado ? "AUTORIZADO" : "NO_RECONOCIDO";
-    }
-
-    const insertQuery = `
-      INSERT INTO RegistrosAcceso 
-      (Placa, FechaHora, EstadoAutorizacion, ModoAcceso)
-      VALUES (?, NOW(), ?, ?)
-    `;
-
-    db.query(insertQuery, [placa, estado, modo], (err, result) => {
-      if (err) {
-        console.error("❌ Error al insertar automático:", err);
-        return res.status(500).send("Error al registrar acceso");
-      }
-
-      res.json({ ok: true, estado });
-    });
-  });
-});
-
-// ==============================
-// INICIAR SERVIDOR
-// ==============================
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Servidor escuchando en el puerto ${PORT}`);
 });
 
 // ==============================
@@ -229,12 +183,12 @@ app.get("/vehiculos", (req, res) => {
       v.Modelo,
       v.TipoVehiculo,
       v.EmpleadoID,
-      v.EsAutorizado,
       v.FechaVencimiento,
       CONCAT(e.Nombre, ' ', e.ApellidoPaterno, ' ', e.ApellidoMaterno) AS NombrePropietario,
       e.Puesto AS Departamento
     FROM Vehiculos v
     LEFT JOIN Empleados e ON v.EmpleadoID = e.EmpleadoID
+    WHERE e.Estatus = 1
     ORDER BY v.Placa;
   `;
 
@@ -248,7 +202,7 @@ app.get("/vehiculos", (req, res) => {
 });
 
 // ==============================
-// OBTENER EMPLEADOS (para el dropdown)
+// OBTENER EMPLEADOS
 // ==============================
 app.get("/empleados", (req, res) => {
   const query = `
@@ -274,24 +228,30 @@ app.get("/empleados", (req, res) => {
 // DAR DE ALTA UN VEHÍCULO
 // ==============================
 app.post("/vehiculos", (req, res) => {
-  const { placa, marca, modelo, empleadoId, esAutorizado } = req.body;
+  const { placa, marca, modelo, tipoVehiculo, empleadoId, fechaVencimiento } = req.body;
 
-  if (!placa || !marca || !modelo || !empleadoId) {
+  if (!placa || !marca || !modelo || !tipoVehiculo || !empleadoId) {
     return res.status(400).json({ error: "Faltan datos requeridos" });
   }
 
-  // Validar formato de placa (AAA000A)
   const placaRegex = /^[A-Z]{3}\d{3}[A-Z]$/;
   if (!placaRegex.test(placa.toUpperCase())) {
     return res.status(400).json({ error: "Formato de placa inválido. Use AAA000A" });
   }
 
   const query = `
-    INSERT INTO Vehiculos (Placa, Marca, Modelo, EmpleadoID, EsAutorizado)
-    VALUES (?, ?, ?, ?, ?);
+    INSERT INTO Vehiculos (Placa, Marca, Modelo, TipoVehiculo, EmpleadoID, FechaVencimiento)
+    VALUES (?, ?, ?, ?, ?, ?);
   `;
 
-  db.query(query, [placa.toUpperCase(), marca, modelo, empleadoId, esAutorizado ? 1 : 0], (err, result) => {
+  db.query(query, [
+    placa.toUpperCase(), 
+    marca, 
+    modelo, 
+    tipoVehiculo,
+    empleadoId, 
+    fechaVencimiento || null
+  ], (err, result) => {
     if (err) {
       if (err.code === 'ER_DUP_ENTRY') {
         return res.status(409).json({ error: "La placa ya está registrada" });
@@ -304,11 +264,10 @@ app.post("/vehiculos", (req, res) => {
 });
 
 // ==============================
-// DAR DE BAJA UN VEHÍCULO (DELETE)
+// DAR DE BAJA UN VEHÍCULO
 // ==============================
 app.delete("/vehiculos/:placa", (req, res) => {
   const { placa } = req.params;
-
   const query = "DELETE FROM Vehiculos WHERE Placa = ?";
 
   db.query(query, [placa], (err, result) => {
@@ -330,19 +289,19 @@ app.delete("/vehiculos/:placa", (req, res) => {
 // ==============================
 app.put("/vehiculos/:placa", (req, res) => {
   const { placa } = req.params;
-  const { marca, modelo, empleadoId, esAutorizado } = req.body;
+  const { marca, modelo, tipoVehiculo, empleadoId, fechaVencimiento } = req.body;
 
-  if (!marca || !modelo || !empleadoId) {
+  if (!marca || !modelo || !tipoVehiculo || !empleadoId) {
     return res.status(400).json({ error: "Faltan datos requeridos" });
   }
 
   const query = `
     UPDATE Vehiculos 
-    SET Marca = ?, Modelo = ?, EmpleadoID = ?, EsAutorizado = ?
+    SET Marca = ?, Modelo = ?, TipoVehiculo = ?, EmpleadoID = ?, FechaVencimiento = ?
     WHERE Placa = ?;
   `;
 
-  db.query(query, [marca, modelo, empleadoId, esAutorizado ? 1 : 0, placa], (err, result) => {
+  db.query(query, [marca, modelo, tipoVehiculo, empleadoId, fechaVencimiento || null, placa], (err, result) => {
     if (err) {
       console.error("❌ Error al actualizar vehículo:", err);
       return res.status(500).json({ error: "Error al actualizar vehículo" });
@@ -357,24 +316,103 @@ app.put("/vehiculos/:placa", (req, res) => {
 });
 
 // ==============================
-// CAMBIAR ESTADO DE AUTORIZACIÓN
+// DETECCIÓN AUTOMÁTICA DE PLACA
 // ==============================
-app.patch("/vehiculos/:placa/autorizacion", (req, res) => {
-  const { placa } = req.params;
-  const { esAutorizado } = req.body;
-
-  const query = "UPDATE Vehiculos SET EsAutorizado = ? WHERE Placa = ?";
-
-  db.query(query, [esAutorizado ? 1 : 0, placa], (err, result) => {
-    if (err) {
-      console.error("❌ Error al cambiar autorización:", err);
-      return res.status(500).json({ error: "Error al cambiar autorización" });
+app.post("/detectar-placa", async (req, res) => {
+  try {
+    const { image } = req.body;
+    
+    if (!image) {
+      return res.status(400).json({ error: "No se proporcionó imagen" });
     }
 
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ error: "Vehículo no encontrado" });
+    // Crear FormData para enviar a Python
+    const form = new FormData();
+    
+    // Convertir base64 a buffer
+    const imageBuffer = Buffer.from(image.replace(/^data:image\/\w+;base64,/, ''), 'base64');
+    form.append('image', imageBuffer, { 
+      filename: 'capture.jpg',
+      contentType: 'image/jpeg'
+    });
+    
+    console.log("📤 Enviando imagen a Python Flask...");
+    
+    // Llamar a la API de Python
+    const pythonResponse = await fetch('http://localhost:5000/detect', {
+      method: 'POST',
+      body: form,
+      headers: form.getHeaders()
+    });
+    
+    const result = await pythonResponse.json();
+    
+    if (!result.success) {
+      console.log("❌ Python no detectó placa:", result.message);
+      return res.json({ 
+        success: false, 
+        message: result.message || "No se detectó placa en la imagen" 
+      });
     }
+    
+    const placa = result.plate;
+    console.log("✅ Placa detectada:", placa);
+    
+    // Verificar si el vehículo existe en la BD
+    const checkQuery = "SELECT Placa FROM Vehiculos WHERE Placa = ?";
+    
+    db.query(checkQuery, [placa], (err, vehiculos) => {
+      if (err) {
+        console.error("❌ Error al verificar placa:", err);
+        return res.status(500).json({ error: "Error en la verificación" });
+      }
+      
+      // Si existe en la BD, está autorizado
+      let estado = vehiculos.length > 0 ? "AUTORIZADO" : "NO_RECONOCIDO";
+      
+      console.log(`🚗 Placa ${placa} - Estado: ${estado}`);
+      
+      // Insertar en RegistrosAcceso
+      const insertQuery = `
+        INSERT INTO RegistrosAcceso 
+        (Placa, FechaHora, EstadoAutorizacion, ModoAcceso)
+        VALUES (?, NOW(), ?, 'AUTOMATICO')
+      `;
+      
+      db.query(insertQuery, [placa, estado], (err, insertResult) => {
+        if (err) {
+          console.error("❌ Error al insertar registro:", err);
+          return res.status(500).json({ error: "Error al registrar acceso" });
+        }
+        
+        console.log("✅ Registro creado con ID:", insertResult.insertId);
+        
+        res.json({
+          success: true,
+          plate: placa,
+          estado: estado,
+          confidence: result.confidence,
+          image: result.image,
+          registroId: insertResult.insertId
+        });
+      });
+    });
+    
+  } catch (error) {
+    console.error("❌ Error en detección:", error);
+    res.status(500).json({ 
+      success: false,
+      error: "Error al procesar detección",
+      details: error.message 
+    });
+  }
+});
 
-    res.json({ message: "Autorización actualizada exitosamente" });
-  });
+// ==============================
+// INICIAR SERVIDOR
+// ==============================
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🚀 Servidor escuchando en el puerto ${PORT}`);
+  console.log(`📡 API Python debe estar en http://localhost:5000`);
 });
