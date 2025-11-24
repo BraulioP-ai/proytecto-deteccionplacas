@@ -3,6 +3,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import FormData from "form-data";
 import fetch from "node-fetch";
+import fileUpload from "express-fileupload";
 import { db } from "./db.js";
 
 dotenv.config();
@@ -10,6 +11,12 @@ dotenv.config();
 const app = express();
 app.use(express.json({ limit: '50mb' })); 
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
+// Middleware para subir archivos (FormData)
+app.use(fileUpload({
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB max
+  useTempFiles: false
+}));
 
 app.use(
   cors({
@@ -330,23 +337,25 @@ app.put("/vehiculos/:placa", (req, res) => {
 // ==============================
 app.post("/detectar-placa", async (req, res) => {
   try {
-    const { image } = req.body;
-    
-    if (!image) {
-      return res.status(400).json({ error: "No se proporcionó imagen" });
+    // IMPORTANTE: La imagen viene como FormData (archivo), no como JSON
+    if (!req.files || !req.files.image) {
+      console.log("❌ No se recibió archivo de imagen");
+      return res.status(400).json({ 
+        success: false,
+        error: "No se proporcionó imagen" 
+      });
     }
 
+    const imageFile = req.files.image;
+    
+    console.log("📤 Imagen recibida, reenviando a Python Flask...");
+    
     // Crear FormData para enviar a Python
     const form = new FormData();
-    
-    // Convertir base64 a buffer
-    const imageBuffer = Buffer.from(image.replace(/^data:image\/\w+;base64,/, ''), 'base64');
-    form.append('image', imageBuffer, { 
+    form.append('image', imageFile.data, { 
       filename: 'capture.jpg',
       contentType: 'image/jpeg'
     });
-    
-    console.log("📤 Enviando imagen a Python Flask...");
     
     // Llamar a la API de Python
     const pythonApiUrl = process.env.PYTHON_API_URL || 'http://localhost:5000';
@@ -403,7 +412,6 @@ app.post("/detectar-placa", async (req, res) => {
           plate: placa,
           estado: estado,
           confidence: result.confidence,
-          image: result.image,
           registroId: insertResult.insertId
         });
       });

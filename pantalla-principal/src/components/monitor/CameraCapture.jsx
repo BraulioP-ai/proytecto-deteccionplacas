@@ -8,8 +8,8 @@ export default function CameraCapture({ darkMode, guardia }) {
   const [streaming, setStreaming] = useState(false);
   const [ultimaDeteccion, setUltimaDeteccion] = useState(null);
   const [autoCapture, setAutoCapture] = useState(false);
-  const [modoManual, setModoManual] = useState(true); // NUEVO: Modo manual por defecto
-  const [frameCongelado, setFrameCongelado] = useState(null); // NUEVO: Frame congelado
+  const [modoManual, setModoManual] = useState(false); // Modo automático por defecto
+  const [frameCongelado, setFrameCongelado] = useState(null);
   const [procesando, setProcesando] = useState(false);
 
   // Auto-captura cada 1 segundo (solo si está activada)
