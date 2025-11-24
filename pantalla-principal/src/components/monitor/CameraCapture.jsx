@@ -1,264 +1,392 @@
-import { useState, useRef, useEffect } from "react";
-import { Camera, StopCircle, Loader2, XCircle } from "lucide-react";
+import { useRef, useState, useEffect } from "react";
+import { Camera, Square, Play, Pause, Zap } from "lucide-react";
 import { API_URL } from "../../constants/api";
 
-export default function CameraCapture({ darkMode, onDetectionSuccess }) {
+export default function CameraCapture({ darkMode, guardia }) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
-  const intervalRef = useRef(null);
-  
   const [streaming, setStreaming] = useState(false);
+  const [ultimaDeteccion, setUltimaDeteccion] = useState(null);
   const [autoCapture, setAutoCapture] = useState(false);
-  const [capturing, setCapturing] = useState(false);
-  const [error, setError] = useState("");
-  const captureInterval = 1; // Fijo en 1 segundo
-  
-  // Iniciar cámara
+  const [modoManual, setModoManual] = useState(true); // NUEVO: Modo manual por defecto
+  const [frameCongela, setFrameCongelado] = useState(null); // NUEVO: Frame congelado
+  const [procesando, setProcesando] = useState(false);
+
+  // Auto-captura cada 1 segundo (solo si está activada)
+  useEffect(() => {
+    if (!autoCapture || !streaming || modoManual) return;
+
+    const interval = setInterval(() => {
+      captureAndDetect();
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [autoCapture, streaming, modoManual]);
+
   const startCamera = async () => {
     try {
-      setError("");
-      console.log("🎥 Solicitando acceso a la cámara...");
-      
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { 
+        video: {
           width: { ideal: 1280 },
           height: { ideal: 720 },
-          facingMode: "environment"
-        }
+          facingMode: "environment",
+        },
       });
-      
-      console.log("✅ Cámara obtenida");
-      
+
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        
-        videoRef.current.onloadedmetadata = () => {
-          videoRef.current.play()
-            .then(() => {
-              console.log("✅ Video reproduciéndose");
-              setStreaming(true);
-              
-              // ✅ INICIAR DETECCIÓN AUTOMÁTICA AL ABRIR LA CÁMARA
+        videoRef.current.play()
+          .then(() => {
+            console.log("✅ Video reproduciéndose");
+            setStreaming(true);
+            
+            // Si está en modo automático, iniciar detección
+            if (!modoManual) {
               setAutoCapture(true);
               console.log("🔄 Detección automática iniciada (cada 1 segundo)");
-            })
-            .catch(err => {
-              console.error("Error al reproducir video:", err);
-              setError("Error al iniciar la reproducción del video");
-            });
-        };
+            }
+          })
+          .catch((err) => console.error("❌ Error al reproducir video:", err));
       }
     } catch (err) {
       console.error("❌ Error al acceder a la cámara:", err);
-      if (err.name === 'NotAllowedError') {
-        setError("Permiso de cámara denegado. Por favor, permite el acceso a la cámara.");
-      } else if (err.name === 'NotFoundError') {
-        setError("No se encontró ninguna cámara en el dispositivo.");
-      } else {
-        setError("No se pudo acceder a la cámara. " + err.message);
-      }
+      alert("No se pudo acceder a la cámara");
     }
   };
 
-  // Detener cámara
   const stopCamera = () => {
-    // Detener auto-captura primero
-    if (autoCapture) {
-      setAutoCapture(false);
-    }
-    
-    if (videoRef.current && videoRef.current.srcObject) {
-      const stream = videoRef.current.srcObject;
-      const tracks = stream.getTracks();
-      tracks.forEach(track => track.stop());
+    if (videoRef.current?.srcObject) {
+      const tracks = videoRef.current.srcObject.getTracks();
+      tracks.forEach((track) => track.stop());
       videoRef.current.srcObject = null;
-      setStreaming(false);
-      console.log("🛑 Cámara detenida");
     }
+    setStreaming(false);
+    setAutoCapture(false);
+    setFrameCongelado(null);
   };
 
-  // Capturar y detectar placa
+  // NUEVO: Congelar frame actual (como presionar ESPACIO en p.py)
+  const congelarFrame = () => {
+    if (!videoRef.current || !canvasRef.current) return;
+
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    const imageData = canvas.toDataURL("image/jpeg", 0.95);
+    setFrameCongelado(imageData);
+    
+    console.log("📸 Frame congelado - Listo para analizar");
+  };
+
+  // NUEVO: Analizar frame congelado
+  const analizarFrameCongelado = async () => {
+    if (!frameCongelado) return;
+
+    setProcesando(true);
+    await enviarImagen(frameCongelado);
+    setProcesando(false);
+  };
+
+  // NUEVO: Descartar frame y tomar otro
+  const descartarFrame = () => {
+    setFrameCongelado(null);
+  };
+
   const captureAndDetect = async () => {
-    if (!videoRef.current || !canvasRef.current) {
-      console.log("⚠️ Referencias no disponibles");
-      return;
-    }
+    if (!videoRef.current || !canvasRef.current || procesando) return;
 
-    if (videoRef.current.readyState !== videoRef.current.HAVE_ENOUGH_DATA) {
-      console.log("⚠️ Video no listo");
-      return;
-    }
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
 
-    if (capturing) {
-      console.log("⚠️ Ya hay una captura en proceso");
-      return;
-    }
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
 
-    setCapturing(true);
-    setError("");
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
+    const imageData = canvas.toDataURL("image/jpeg", 0.95);
+
+    await enviarImagen(imageData);
+  };
+
+  const enviarImagen = async (imageData) => {
     try {
-      const canvas = canvasRef.current;
-      const video = videoRef.current;
-      
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      
-      const imageData = canvas.toDataURL('image/jpeg', 0.8);
-      const base64Image = imageData.split(',')[1];
+      const blob = await fetch(imageData).then((r) => r.blob());
+      const formData = new FormData();
+      formData.append("image", blob, "capture.jpg");
 
-      console.log("📸 Escaneando placa...");
-
+      console.log("📤 Enviando imagen al detector...");
       const response = await fetch(`${API_URL}/detectar-placa`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ image: base64Image })
+        method: "POST",
+        body: formData,
       });
 
-      const result = await response.json();
+      const data = await response.json();
 
-      if (result.success) {
-        console.log("✅ Placa detectada:", result.plate);
-        
-        if (onDetectionSuccess) {
-          onDetectionSuccess(result);
+      if (data.success && data.plate) {
+        console.log("✅ Placa detectada:", data.plate);
+
+        const registroData = {
+          placa: data.plate,
+          guardia_id: guardia?.id || 1,
+        };
+
+        const registroResponse = await fetch(`${API_URL}/acceso/manual`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(registroData),
+        });
+
+        if (registroResponse.ok) {
+          const registro = await registroResponse.json();
+          setUltimaDeteccion({
+            placa: data.plate,
+            confianza: data.confidence,
+            estado: registro.EstadoAutorizacion,
+            timestamp: new Date().toLocaleString("es-MX"),
+            propietario: registro.NombreCompleto || "Visitante",
+            vehiculo: registro.Marca && registro.Modelo 
+              ? `${registro.Marca} ${registro.Modelo}`
+              : "No registrado",
+          });
         }
-        
-        setError("");
       } else {
-        // No mostrar error si no detecta (es normal en modo auto)
-        console.log("⚪ No se detectó placa en este frame");
+        console.log("⚠️ No se detectó placa:", data.message);
       }
-    } catch (err) {
-      console.error("❌ Error en captura:", err);
-      // Solo mostrar error si es crítico
-      if (!err.message.includes('fetch')) {
-        setError("Error al procesar. Verifica los servidores.");
-      }
-    } finally {
-      setCapturing(false);
+    } catch (error) {
+      console.error("❌ Error en detección:", error);
     }
   };
 
-  // Efecto para auto-captura
-  useEffect(() => {
-    if (autoCapture && streaming) {
-      // Primera captura inmediata
-      captureAndDetect();
-      
-      // Luego cada segundo
-      intervalRef.current = setInterval(() => {
-        captureAndDetect();
-      }, captureInterval * 1000);
+  // NUEVO: Cambiar entre modo manual y automático
+  const toggleModo = () => {
+    setModoManual(!modoManual);
+    setFrameCongelado(null);
+    
+    if (modoManual) {
+      // Cambiando a automático
+      if (streaming) {
+        setAutoCapture(true);
+      }
     } else {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
-      }
+      // Cambiando a manual
+      setAutoCapture(false);
     }
-
-    return () => {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-      }
-    };
-  }, [autoCapture, streaming]);
-
-  // Limpiar al desmontar
-  useEffect(() => {
-    return () => {
-      stopCamera();
-    };
-  }, []);
+  };
 
   return (
-    <div className="space-y-4">
-      {/* Video de la cámara */}
-      <div className="relative bg-black rounded-lg overflow-hidden" style={{ aspectRatio: '16/9' }}>
+    <div className={`p-6 ${darkMode ? "bg-gray-800" : "bg-white"} rounded-xl shadow-lg`}>
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-xl font-bold flex items-center gap-2">
+          <Camera className="w-6 h-6" />
+          Monitor de Acceso Automático
+        </h3>
+        
+        {/* NUEVO: Selector de modo */}
+        <div className="flex gap-2">
+          <button
+            onClick={toggleModo}
+            className={`px-4 py-2 rounded-lg font-semibold transition-colors ${
+              modoManual
+                ? darkMode ? "bg-purple-900 text-purple-300" : "bg-purple-100 text-purple-700"
+                : darkMode ? "bg-blue-900 text-blue-300" : "bg-blue-100 text-blue-700"
+            }`}
+          >
+            {modoManual ? "🎯 Modo Manual" : "⚡ Modo Automático"}
+          </button>
+        </div>
+      </div>
+
+      {/* Video/Canvas */}
+      <div className="relative mb-4">
         <video
           ref={videoRef}
-          autoPlay
+          className={`w-full h-[500px] bg-black object-cover rounded-lg ${
+            frameCongelado ? "hidden" : ""
+          }`}
           playsInline
-          muted
-          className={`w-full h-full object-cover ${streaming ? 'block' : 'hidden'}`}
         />
         
+        {/* NUEVO: Mostrar frame congelado */}
+        {frameCongelado && (
+          <img
+            src={frameCongelado}
+            alt="Frame congelado"
+            className="w-full h-[500px] object-cover rounded-lg border-4 border-yellow-500"
+          />
+        )}
+
+        <canvas ref={canvasRef} className="hidden" />
+
         {!streaming && (
-          <div className="absolute inset-0 flex items-center justify-center text-gray-400">
-            <div className="text-center p-8">
-              <Camera className="w-16 h-16 mx-auto mb-4 opacity-50" />
+          <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-50 rounded-lg">
+            <div className="text-center text-white">
+              <Camera className="w-16 h-16 mx-auto mb-2 opacity-50" />
               <p>Cámara detenida</p>
             </div>
           </div>
         )}
-        
-        {/* Indicador de detección automática */}
-        {streaming && autoCapture && (
-          <div className="absolute top-4 left-4 bg-red-600 text-white px-3 py-2 rounded-lg flex items-center gap-2 animate-pulse">
-            <div className="w-3 h-3 bg-white rounded-full"></div>
-            <span className="font-semibold">🔍 ESCANEANDO (cada 1 seg)</span>
+
+        {/* Indicador de modo */}
+        {streaming && !frameCongelado && (
+          <div className={`absolute top-4 left-4 px-3 py-1 rounded-lg font-semibold ${
+            modoManual
+              ? "bg-purple-600 text-white"
+              : autoCapture
+              ? "bg-green-600 text-white animate-pulse"
+              : "bg-gray-600 text-white"
+          }`}>
+            {modoManual ? "🎯 LISTO - Presiona CAPTURAR" : autoCapture ? "🔍 ESCANEANDO (cada 1 seg)" : "⏸️ PAUSADO"}
           </div>
         )}
-        
-        {/* Overlay de captura */}
-        {capturing && (
-          <div className="absolute top-4 right-4 bg-blue-600 text-white px-3 py-2 rounded-lg flex items-center gap-2">
-            <Loader2 className="w-4 h-4 animate-spin" />
-            <span className="font-semibold">Analizando...</span>
+
+        {procesando && (
+          <div className="absolute top-4 right-4 bg-blue-600 text-white px-3 py-1 rounded-lg font-semibold animate-pulse">
+            ⏳ Analizando...
           </div>
         )}
       </div>
 
-      <canvas ref={canvasRef} className="hidden" />
-
-      {/* Controles simplificados */}
-      <div className="flex gap-3">
+      {/* Controles */}
+      <div className="flex gap-3 flex-wrap">
         {!streaming ? (
           <button
             onClick={startCamera}
-            className="flex-1 bg-green-600 hover:bg-green-700 text-white py-3 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2"
+            className="flex-1 bg-green-600 hover:bg-green-700 text-white px-6 py-3 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2"
           >
-            <Camera className="w-5 h-5" />
-            Iniciar Cámara y Detección
+            <Play className="w-5 h-5" /> Iniciar Cámara
           </button>
         ) : (
           <>
-            <button
-              onClick={captureAndDetect}
-              disabled={capturing}
-              className={`flex-1 ${
-                capturing
-                  ? 'bg-gray-400 cursor-not-allowed'
-                  : 'bg-purple-600 hover:bg-purple-700'
-              } text-white py-3 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2`}
-            >
-              <Camera className="w-5 h-5" />
-              Captura Manual
-            </button>
+            {modoManual ? (
+              // CONTROLES MODO MANUAL (como p.py)
+              <>
+                {!frameCongelado ? (
+                  <button
+                    onClick={congelarFrame}
+                    className="flex-1 bg-yellow-600 hover:bg-yellow-700 text-white px-6 py-3 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2"
+                  >
+                    <Square className="w-5 h-5" /> 📸 CAPTURAR (como ESPACIO)
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      onClick={analizarFrameCongelado}
+                      disabled={procesando}
+                      className="flex-1 bg-green-600 hover:bg-green-700 disabled:bg-gray-500 text-white px-6 py-3 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2"
+                    >
+                      <Zap className="w-5 h-5" /> 
+                      {procesando ? "Analizando..." : "✅ ANALIZAR PLACA"}
+                    </button>
+                    <button
+                      onClick={descartarFrame}
+                      disabled={procesando}
+                      className="bg-red-600 hover:bg-red-700 disabled:bg-gray-500 text-white px-6 py-3 rounded-lg font-semibold transition-colors"
+                    >
+                      ❌ Descartar
+                    </button>
+                  </>
+                )}
+              </>
+            ) : (
+              // CONTROLES MODO AUTOMÁTICO
+              <>
+                <button
+                  onClick={() => setAutoCapture(!autoCapture)}
+                  className={`flex-1 ${
+                    autoCapture
+                      ? "bg-yellow-600 hover:bg-yellow-700"
+                      : "bg-green-600 hover:bg-green-700"
+                  } text-white px-6 py-3 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2`}
+                >
+                  {autoCapture ? (
+                    <>
+                      <Pause className="w-5 h-5" /> Pausar Detección
+                    </>
+                  ) : (
+                    <>
+                      <Play className="w-5 h-5" /> Iniciar Detección
+                    </>
+                  )}
+                </button>
+                <button
+                  onClick={captureAndDetect}
+                  disabled={procesando}
+                  className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-500 text-white px-6 py-3 rounded-lg font-semibold transition-colors"
+                >
+                  📸 Captura Manual
+                </button>
+              </>
+            )}
             
             <button
               onClick={stopCamera}
-              className="bg-red-600 hover:bg-red-700 text-white py-3 px-6 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2"
+              className="bg-red-600 hover:bg-red-700 text-white px-6 py-3 rounded-lg font-semibold transition-colors"
             >
-              <StopCircle className="w-5 h-5" />
-              Detener
+              ⏹️ Detener
             </button>
           </>
         )}
       </div>
 
-      {/* Mensajes de error */}
-      {error && (
-        <div className={`${
-          darkMode ? 'bg-red-900 text-red-300' : 'bg-red-100 text-red-700'
-        } p-4 rounded-lg flex items-center gap-3`}>
-          <XCircle className="w-5 h-5 flex-shrink-0" />
-          <p>{error}</p>
+      {/* INSTRUCCIONES SEGÚN MODO */}
+      {streaming && (
+        <div className={`mt-4 p-3 rounded-lg ${
+          darkMode ? "bg-gray-700" : "bg-gray-100"
+        }`}>
+          <p className="text-sm">
+            {modoManual ? (
+              <>
+                <strong>🎯 Modo Manual (como p.py):</strong> Enfoca bien la placa, presiona "CAPTURAR" cuando esté perfecta, luego "ANALIZAR".
+              </>
+            ) : (
+              <>
+                <strong>⚡ Modo Automático:</strong> El sistema escanea automáticamente cada 1 segundo.
+              </>
+            )}
+          </p>
+        </div>
+      )}
+
+      {/* Última detección */}
+      {ultimaDeteccion && (
+        <div className={`mt-6 p-4 rounded-lg ${
+          darkMode ? "bg-gray-700" : "bg-gray-100"
+        }`}>
+          <h4 className="font-bold mb-2">Último Vehículo Detectado:</h4>
+          <div className="grid grid-cols-2 gap-2 text-sm">
+            <div>
+              <strong>Placa:</strong> {ultimaDeteccion.placa}
+            </div>
+            <div>
+              <strong>Confianza:</strong> {(ultimaDeteccion.confianza * 100).toFixed(0)}%
+            </div>
+            <div>
+              <strong>Estado:</strong>{" "}
+              <span className={
+                ultimaDeteccion.estado === "AUTORIZADO"
+                  ? "text-green-600 font-bold"
+                  : "text-red-600 font-bold"
+              }>
+                {ultimaDeteccion.estado}
+              </span>
+            </div>
+            <div>
+              <strong>Propietario:</strong> {ultimaDeteccion.propietario}
+            </div>
+            <div className="col-span-2">
+              <strong>Vehículo:</strong> {ultimaDeteccion.vehiculo}
+            </div>
+            <div className="col-span-2 text-xs text-gray-500">
+              {ultimaDeteccion.timestamp}
+            </div>
+          </div>
         </div>
       )}
     </div>
