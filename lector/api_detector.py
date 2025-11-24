@@ -47,36 +47,50 @@ def evaluar_calidad_imagen(image_path):
 def detect_plate(image_path, output_path="plate_detected.jpg"):
     """
     Detecta y recorta la región de la placa usando múltiples técnicas
+    OPTIMIZADO PARA PLACAS MEXICANAS CON DECORACIÓN
     """
     img = cv2.imread(image_path)
     if img is None:
         return None
 
     height, width = img.shape[:2]
+    
+    # MEJORA: Si la imagen es muy pequeña, escalarla
+    if width < 640:
+        scale = 640 / width
+        img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
+        height, width = img.shape[:2]
+    
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     
-    # MEJORA 1: Ecualización de histograma adaptativo
-    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8,8))
+    # MEJORA 1: Ecualización más agresiva para mejorar contraste
+    clahe = cv2.createCLAHE(clipLimit=3.5, tileGridSize=(8,8))
     gray = clahe.apply(gray)
     
     # MEJORA 2: Múltiples técnicas de detección de bordes
     # Técnica 1: Bilateral + Canny
     blur1 = cv2.bilateralFilter(gray, 11, 17, 17)
-    edges1 = cv2.Canny(blur1, 30, 200)
+    edges1 = cv2.Canny(blur1, 20, 150)  # Umbrales más bajos
     
-    # Técnica 2: GaussianBlur + Canny con diferentes parámetros
+    # Técnica 2: GaussianBlur + Canny
     blur2 = cv2.GaussianBlur(gray, (5,5), 0)
-    edges2 = cv2.Canny(blur2, 50, 150)
+    edges2 = cv2.Canny(blur2, 30, 200)
     
-    # Combinar ambas detecciones
+    # Técnica 3: Morph Gradient (detecta bordes directamente)
+    kernel_grad = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    gradient = cv2.morphologyEx(gray, cv2.MORPH_GRADIENT, kernel_grad)
+    _, edges3 = cv2.threshold(gradient, 50, 255, cv2.THRESH_BINARY)
+    
+    # Combinar las 3 detecciones
     edges = cv2.bitwise_or(edges1, edges2)
+    edges = cv2.bitwise_or(edges, edges3)
     
-    # Dilatación para conectar bordes
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    edges = cv2.dilate(edges, kernel, iterations=1)
+    # Dilatación más agresiva para conectar bordes
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3))
+    edges = cv2.dilate(edges, kernel, iterations=2)
 
     contours, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)[:40]
+    contours = sorted(contours, key=cv2.contourArea, reverse=True)[:50]  # Más candidatos
 
     candidates = []
 
@@ -84,53 +98,82 @@ def detect_plate(image_path, output_path="plate_detected.jpg"):
         perimeter = cv2.arcLength(cnt, True)
         approx = cv2.approxPolyDP(cnt, 0.02 * perimeter, True)
 
-        # MEJORA 3: Buscar tanto cuadriláteros como rectángulos aproximados
-        if len(approx) >= 4:
+        # MEJORA 3: Aceptar más formas (no solo cuadriláteros perfectos)
+        if len(approx) >= 4 and len(approx) <= 8:  # Entre 4 y 8 lados
             x, y, w, h = cv2.boundingRect(cnt)
             
-            # Validaciones más flexibles
+            # Validaciones MÁS FLEXIBLES para placas mexicanas decoradas
             aspect_ratio = w / float(h) if h > 0 else 0
             area = w * h
             
-            # Filtros para placas mexicanas
-            # - Aspect ratio entre 1.8 y 5.0 (más flexible)
-            # - Área mínima de 1500 px
-            # - No muy grande (máximo 40% de la imagen)
-            # - No muy chica en altura (mínimo 15px)
-            max_area = (width * height) * 0.4
+            # NUEVO: Calcular densidad de bordes dentro del rectángulo
+            roi_edges = edges[y:y+h, x:x+w]
+            edge_density = np.sum(roi_edges > 0) / (w * h) if (w * h) > 0 else 0
             
-            if (1.8 < aspect_ratio < 5.0 and 
-                1500 < area < max_area and 
-                h > 15 and w > 50):
+            # Filtros MUCHO más flexibles
+            max_area = (width * height) * 0.5  # Hasta 50% de la imagen
+            min_area = 2000 if width > 640 else 1000
+            
+            if (1.5 < aspect_ratio < 6.0 and  # Ratio muy flexible
+                min_area < area < max_area and 
+                h > 10 and w > 40 and
+                edge_density > 0.05):  # Al menos 5% de bordes
                 
                 # Calcular score con múltiples factores
-                ratio_ideal = 3.2  # Ratio ideal para placas mexicanas
+                ratio_ideal = 3.5  # Ratio ideal para placas mexicanas con decoración
                 ratio_score = 1 / (1 + abs(aspect_ratio - ratio_ideal))
-                area_score = area / 5000  # Normalizar área
+                area_score = min(area / 10000, 1.0)  # Normalizar área
                 position_score = 1 - (y / height)  # Placas suelen estar en parte baja
+                edge_score = min(edge_density * 10, 1.0)  # Bonus por bordes
                 
-                total_score = (area_score * 0.5) + (ratio_score * 0.3) + (position_score * 0.2)
+                total_score = (area_score * 0.4) + (ratio_score * 0.2) + (position_score * 0.1) + (edge_score * 0.3)
                 
                 candidates.append({
                     'bbox': (x, y, w, h),
                     'score': total_score,
                     'area': area,
-                    'ratio': aspect_ratio
+                    'ratio': aspect_ratio,
+                    'edges': edge_density
                 })
 
     if not candidates:
+        print("⚠️ No se encontraron candidatos con los filtros estrictos")
+        print("🔍 Intentando con filtros MUY relajados...")
+        
+        # FALLBACK: Búsqueda muy relajada
+        for cnt in contours[:30]:
+            x, y, w, h = cv2.boundingRect(cnt)
+            aspect_ratio = w / float(h) if h > 0 else 0
+            area = w * h
+            
+            if (1.2 < aspect_ratio < 7.0 and 
+                area > 1500 and 
+                h > 8):
+                
+                candidates.append({
+                    'bbox': (x, y, w, h),
+                    'score': area / 5000,
+                    'area': area,
+                    'ratio': aspect_ratio,
+                    'edges': 0.0
+                })
+    
+    if not candidates:
+        print("❌ No se encontraron candidatos válidos")
         return None
     
-    # MEJORA 4: Ordenar por score y probar los mejores candidatos
+    # MEJORA 4: Ordenar por score
     candidates = sorted(candidates, key=lambda x: x['score'], reverse=True)
     
     # Tomar el mejor candidato
     best = candidates[0]
     x, y, w, h = best['bbox']
     
-    # MEJORA 5: Agregar margen inteligente según tamaño
-    margin_x = int(w * 0.05)  # 5% del ancho
-    margin_y = int(h * 0.1)   # 10% del alto
+    print(f"📍 Mejor candidato: área={best['area']}, ratio={best['ratio']:.2f}, edges={best['edges']:.3f}, score={best['score']:.3f}")
+    
+    # MEJORA 5: Margen adaptativo según confianza
+    margin_x = int(w * 0.1)  # 10% del ancho
+    margin_y = int(h * 0.15)   # 15% del alto
     
     x = max(0, x - margin_x)
     y = max(0, y - margin_y)
@@ -138,9 +181,14 @@ def detect_plate(image_path, output_path="plate_detected.jpg"):
     h = min(img.shape[0] - y, h + 2*margin_y)
     
     plate = img[y:y+h, x:x+w]
+    
+    # MEJORA 6: Guardar imagen de debug
+    debug_img = img.copy()
+    cv2.rectangle(debug_img, (x, y), (x+w, y+h), (0, 255, 0), 3)
+    cv2.imwrite("debug_detection.jpg", debug_img)
+    
     cv2.imwrite(output_path, plate)
     
-    print(f"📍 Placa detectada: área={best['area']}, ratio={best['ratio']:.2f}, score={best['score']:.2f}")
     return output_path
 
 
