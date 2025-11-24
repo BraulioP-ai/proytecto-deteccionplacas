@@ -13,6 +13,9 @@ app = Flask(__name__)
 CORS(app)
 
 def detect_plate(image_path, output_path="plate_detected.jpg"):
+    """
+    Detecta y recorta la región de la placa en la imagen
+    """
     img = cv2.imread(image_path)
     if img is None:
         return None
@@ -72,20 +75,24 @@ def detect_plate(image_path, output_path="plate_detected.jpg"):
 
 
 def preprocesar_placa(ruta_imagen):
+    """
+    Preprocesa la placa usando las técnicas mejoradas de p.py
+    MEJORAS INTEGRADAS:
+    - CLAHE optimizado (clipLimit=3.0)
+    - Adaptive Threshold en lugar de umbral fijo
+    - Morphology CLOSE para reparar caracteres
+    - Resize 2x para mejor OCR
+    - Suavizado controlado con GaussianBlur
+    """
     img = cv2.imread(ruta_imagen)
     if img is None:
         return None
 
-    # Redimensionar para mejor OCR (mínimo 300px de ancho)
     height, width = img.shape[:2]
-    if width < 300:
-        scale = 300 / width
-        img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-        height, width = img.shape[:2]
 
-    # Recortar bordes (5% arriba/abajo, 2% izq/der)
-    crop_top = int(height * 0.05)
-    crop_bottom = int(height * 0.95)
+    # Recortar bordes (ajustado según p.py)
+    crop_top = int(height * 0.15)
+    crop_bottom = int(height * 0.85)
     crop_left = int(width * 0.02)
     crop_right = int(width * 0.98)
     img = img[crop_top:crop_bottom, crop_left:crop_right]
@@ -93,25 +100,28 @@ def preprocesar_placa(ruta_imagen):
     # Convertir a escala de grises
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     
-    # Reducir ruido
-    gray = cv2.fastNlMeansDenoising(gray, h=10)
+    # Resize 2x ANTES de procesar (mejora de p.py)
+    gray = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_LINEAR)
 
-    # Mejorar contraste con CLAHE
-    clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8, 8))
+    # Mejorar contraste con CLAHE (parámetros optimizados de p.py)
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
     contrast = clahe.apply(gray)
 
-    # Binarización adaptativa
+    # Suavizado ligero para quitar ruido sin perder detalles (de p.py)
+    contrast = cv2.GaussianBlur(contrast, (3, 3), 0)
+
+    # Binarización adaptativa (mejora clave de p.py)
     thresh = cv2.adaptiveThreshold(
         contrast,
         255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.ADAPTIVE_THRESH_MEAN_C,  # Cambiado de GAUSSIAN a MEAN como en p.py
         cv2.THRESH_BINARY,
-        25,
-        10
+        19,  # Parámetros optimizados de p.py
+        9
     )
 
-    # Morfología para limpiar
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    # Morfología CLOSE muy leve para reparar caracteres (de p.py)
+    kernel = np.ones((2, 2), np.uint8)
     thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
     
     # Eliminar componentes pequeños (ruido)
@@ -127,9 +137,6 @@ def preprocesar_placa(ruta_imagen):
             cleaned[labels == i] = 255
     
     cleaned = 255 - cleaned
-
-    # Escalar 2x para mejor OCR
-    cleaned = cv2.resize(cleaned, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
 
     output_path = "placa_procesada.png"
     cv2.imwrite(output_path, cleaned)
@@ -184,16 +191,21 @@ def validar_formato_placa(texto):
 
 def leer_placa(ruta_imagen):
     """
-    Lee la placa usando Tesseract OCR con múltiples intentos
+    Lee la placa usando Tesseract OCR con configuración optimizada de p.py
     """
     try:
         img = Image.open(ruta_imagen)
         
-        # Configuraciones de Tesseract para probar
+        # Configuración de Tesseract optimizada (de p.py)
+        # --oem 3: OCR Engine Mode 3 (Default, based on what is available)
+        # --psm 7: Treat the image as a single text line
+        config = '--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+        
+        # Configuraciones adicionales para probar
         configs = [
-            '--psm 7 --oem 3 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
-            '--psm 8 --oem 3 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
-            '--psm 13 --oem 3 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+            '--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+            '--oem 3 --psm 8 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+            '--oem 3 --psm 13 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
         ]
         
         mejores_resultados = []
@@ -252,7 +264,7 @@ def detect():
                 'message': 'No se detectó placa en la imagen'
             })
 
-        print("🔧 Paso 2: Preprocesando imagen...")
+        print("🔧 Paso 2: Preprocesando imagen (con mejoras de p.py)...")
         processed_path = preprocesar_placa(plate_path)
         
         if not processed_path:
@@ -263,7 +275,7 @@ def detect():
                 'message': 'Error al procesar la placa'
             })
 
-        print("📖 Paso 3: Leyendo texto con OCR...")
+        print("📖 Paso 3: Leyendo texto con OCR optimizado...")
         plate_text = leer_placa(processed_path)
         
         if not plate_text:
@@ -305,11 +317,26 @@ def detect():
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'ok', 'message': 'API de detección funcionando con Tesseract OCR mejorado'})
+    return jsonify({
+        'status': 'ok', 
+        'message': 'API de detección funcionando con Tesseract OCR MEJORADO v2',
+        'improvements': [
+            'CLAHE optimizado (clipLimit=3.0)',
+            'Adaptive Threshold MEAN',
+            'Morphology CLOSE para reparar caracteres',
+            'Resize 2x antes de procesamiento',
+            'GaussianBlur controlado (3x3)'
+        ]
+    })
 
 
 if __name__ == '__main__':
-    print("🚀 Iniciando API de detección de placas con Tesseract OCR MEJORADO")
-    print("📍 Servidor corriendo en http://localhost:5000")
-    print("✨ Mejoras: Preprocesamiento avanzado, corrección de OCR, validación de formato")
+    print("🚀 Iniciando API de detección de placas MEJORADA")
+    print("🔍 Servidor corriendo en http://localhost:5000")
+    print("✨ MEJORAS INTEGRADAS de p.py:")
+    print("   - CLAHE con parámetros optimizados")
+    print("   - Adaptive Threshold MEAN_C")
+    print("   - Morphology CLOSE ligero")
+    print("   - Resize 2x antes de OCR")
+    print("   - GaussianBlur controlado")
     app.run(host='0.0.0.0', port=5000, debug=True)

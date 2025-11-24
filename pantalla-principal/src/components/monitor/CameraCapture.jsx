@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { Camera, StopCircle, Loader2, CheckCircle, XCircle, Play, Pause } from "lucide-react";
+import { Camera, StopCircle, Loader2, XCircle } from "lucide-react";
 import { API_URL } from "../../constants/api";
 
 export default function CameraCapture({ darkMode, onDetectionSuccess }) {
@@ -10,10 +10,9 @@ export default function CameraCapture({ darkMode, onDetectionSuccess }) {
   const [streaming, setStreaming] = useState(false);
   const [autoCapture, setAutoCapture] = useState(false);
   const [capturing, setCapturing] = useState(false);
-  const [lastDetection, setLastDetection] = useState(null);
   const [error, setError] = useState("");
-  const [captureInterval, setCaptureInterval] = useState(1); // segundos
-
+  const captureInterval = 1; // Fijo en 1 segundo
+  
   // Iniciar cámara
   const startCamera = async () => {
     try {
@@ -38,6 +37,10 @@ export default function CameraCapture({ darkMode, onDetectionSuccess }) {
             .then(() => {
               console.log("✅ Video reproduciéndose");
               setStreaming(true);
+              
+              // ✅ INICIAR DETECCIÓN AUTOMÁTICA AL ABRIR LA CÁMARA
+              setAutoCapture(true);
+              console.log("🔄 Detección automática iniciada (cada 1 segundo)");
             })
             .catch(err => {
               console.error("Error al reproducir video:", err);
@@ -61,7 +64,7 @@ export default function CameraCapture({ darkMode, onDetectionSuccess }) {
   const stopCamera = () => {
     // Detener auto-captura primero
     if (autoCapture) {
-      toggleAutoCapture();
+      setAutoCapture(false);
     }
     
     if (videoRef.current && videoRef.current.srcObject) {
@@ -107,7 +110,7 @@ export default function CameraCapture({ darkMode, onDetectionSuccess }) {
       const imageData = canvas.toDataURL('image/jpeg', 0.8);
       const base64Image = imageData.split(',')[1];
 
-      console.log("📸 Captura automática, enviando al servidor...");
+      console.log("📸 Escaneando placa...");
 
       const response = await fetch(`${API_URL}/detectar-placa`, {
         method: 'POST',
@@ -121,12 +124,6 @@ export default function CameraCapture({ darkMode, onDetectionSuccess }) {
 
       if (result.success) {
         console.log("✅ Placa detectada:", result.plate);
-        setLastDetection({
-          plate: result.plate,
-          estado: result.estado,
-          confidence: result.confidence,
-          timestamp: new Date().toLocaleTimeString('es-MX')
-        });
         
         if (onDetectionSuccess) {
           onDetectionSuccess(result);
@@ -148,22 +145,13 @@ export default function CameraCapture({ darkMode, onDetectionSuccess }) {
     }
   };
 
-  // Toggle auto-captura
-  const toggleAutoCapture = () => {
-    if (!autoCapture) {
-      console.log(`🔄 Iniciando captura automática cada ${captureInterval}s`);
-      setAutoCapture(true);
-      // Primera captura inmediata
-      captureAndDetect();
-    } else {
-      console.log("⏸️ Deteniendo captura automática");
-      setAutoCapture(false);
-    }
-  };
-
   // Efecto para auto-captura
   useEffect(() => {
     if (autoCapture && streaming) {
+      // Primera captura inmediata
+      captureAndDetect();
+      
+      // Luego cada segundo
       intervalRef.current = setInterval(() => {
         captureAndDetect();
       }, captureInterval * 1000);
@@ -179,7 +167,7 @@ export default function CameraCapture({ darkMode, onDetectionSuccess }) {
         clearInterval(intervalRef.current);
       }
     };
-  }, [autoCapture, streaming, captureInterval]);
+  }, [autoCapture, streaming]);
 
   // Limpiar al desmontar
   useEffect(() => {
@@ -209,11 +197,11 @@ export default function CameraCapture({ darkMode, onDetectionSuccess }) {
           </div>
         )}
         
-        {/* Indicador de auto-captura */}
-        {autoCapture && (
+        {/* Indicador de detección automática */}
+        {streaming && autoCapture && (
           <div className="absolute top-4 left-4 bg-red-600 text-white px-3 py-2 rounded-lg flex items-center gap-2 animate-pulse">
             <div className="w-3 h-3 bg-white rounded-full"></div>
-            <span className="font-semibold">DETECTANDO AUTOMÁTICAMENTE</span>
+            <span className="font-semibold">🔍 ESCANEANDO (cada 1 seg)</span>
           </div>
         )}
         
@@ -228,30 +216,7 @@ export default function CameraCapture({ darkMode, onDetectionSuccess }) {
 
       <canvas ref={canvasRef} className="hidden" />
 
-      {/* Configuración de intervalo */}
-      {streaming && (
-        <div className={`${darkMode ? 'bg-gray-750' : 'bg-gray-100'} p-4 rounded-lg`}>
-          <label className="block text-sm font-semibold mb-2">
-            Intervalo de captura: {captureInterval}s
-          </label>
-          <input
-            type="range"
-            min="1"
-            max="10"
-            step="1"
-            value={captureInterval}
-            onChange={(e) => setCaptureInterval(Number(e.target.value))}
-            disabled={autoCapture}
-            className="w-full"
-          />
-          <div className="flex justify-between text-xs mt-1 text-gray-500">
-            <span>1s (rápido)</span>
-            <span>10s (lento)</span>
-          </div>
-        </div>
-      )}
-
-      {/* Controles */}
+      {/* Controles simplificados */}
       <div className="flex gap-3">
         {!streaming ? (
           <button
@@ -259,42 +224,21 @@ export default function CameraCapture({ darkMode, onDetectionSuccess }) {
             className="flex-1 bg-green-600 hover:bg-green-700 text-white py-3 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2"
           >
             <Camera className="w-5 h-5" />
-            Iniciar Cámara
+            Iniciar Cámara y Detección
           </button>
         ) : (
           <>
             <button
-              onClick={toggleAutoCapture}
-              className={`flex-1 ${
-                autoCapture
-                  ? 'bg-orange-600 hover:bg-orange-700'
-                  : 'bg-blue-600 hover:bg-blue-700'
-              } text-white py-3 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2`}
-            >
-              {autoCapture ? (
-                <>
-                  <Pause className="w-5 h-5" />
-                  Pausar Detección
-                </>
-              ) : (
-                <>
-                  <Play className="w-5 h-5" />
-                  Iniciar Detección Auto
-                </>
-              )}
-            </button>
-            
-            <button
               onClick={captureAndDetect}
-              disabled={capturing || autoCapture}
-              className={`${
-                capturing || autoCapture
+              disabled={capturing}
+              className={`flex-1 ${
+                capturing
                   ? 'bg-gray-400 cursor-not-allowed'
                   : 'bg-purple-600 hover:bg-purple-700'
-              } text-white py-3 px-6 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2`}
+              } text-white py-3 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2`}
             >
               <Camera className="w-5 h-5" />
-              Manual
+              Captura Manual
             </button>
             
             <button
@@ -317,75 +261,6 @@ export default function CameraCapture({ darkMode, onDetectionSuccess }) {
           <p>{error}</p>
         </div>
       )}
-
-      {/* Última detección */}
-      {lastDetection && (
-        <div className={`${
-          darkMode ? 'bg-gray-750 border-gray-700' : 'bg-gray-50 border-gray-200'
-        } border-2 rounded-lg p-4`}>
-          <div className="flex items-center gap-3 mb-3">
-            <CheckCircle className="w-6 h-6 text-green-500" />
-            <h4 className="font-bold text-lg">Última Detección</h4>
-          </div>
-          
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <p className={`text-xs font-semibold uppercase mb-1 ${
-                darkMode ? 'text-gray-400' : 'text-gray-500'
-              }`}>
-                Placa
-              </p>
-              <p className="font-mono text-2xl font-black">{lastDetection.plate}</p>
-            </div>
-            
-            <div>
-              <p className={`text-xs font-semibold uppercase mb-1 ${
-                darkMode ? 'text-gray-400' : 'text-gray-500'
-              }`}>
-                Estado
-              </p>
-              <span className={`inline-block px-3 py-1 rounded-full text-sm font-semibold ${
-                lastDetection.estado === 'AUTORIZADO'
-                  ? darkMode ? 'bg-green-900 text-green-300' : 'bg-green-100 text-green-700'
-                  : darkMode ? 'bg-yellow-900 text-yellow-300' : 'bg-yellow-100 text-yellow-700'
-              }`}>
-                {lastDetection.estado}
-              </span>
-            </div>
-            
-            <div>
-              <p className={`text-xs font-semibold uppercase mb-1 ${
-                darkMode ? 'text-gray-400' : 'text-gray-500'
-              }`}>
-                Confianza
-              </p>
-              <p className="font-semibold">{(lastDetection.confidence * 100).toFixed(1)}%</p>
-            </div>
-            
-            <div>
-              <p className={`text-xs font-semibold uppercase mb-1 ${
-                darkMode ? 'text-gray-400' : 'text-gray-500'
-              }`}>
-                Hora
-              </p>
-              <p className="font-mono">{lastDetection.timestamp}</p>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Instrucciones */}
-      <div className={`${
-        darkMode ? 'bg-blue-900 text-blue-300' : 'bg-blue-50 text-blue-700'
-      } p-4 rounded-lg text-sm`}>
-        <p className="font-semibold mb-2">🤖 Modo Automático:</p>
-        <ul className="space-y-1 ml-4">
-          <li>• Detecta placas automáticamente sin presionar botones</li>
-          <li>• Ajusta el intervalo según tus necesidades (1-10 segundos)</li>
-          <li>• Mantén la cámara apuntando hacia el área de acceso</li>
-          <li>• Las detecciones aparecerán en tiempo real</li>
-        </ul>
-      </div>
     </div>
   );
 }

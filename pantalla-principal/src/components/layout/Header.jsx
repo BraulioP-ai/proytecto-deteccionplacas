@@ -1,5 +1,4 @@
-import { Moon, Sun, FileText, ShieldCheck, Car } from "lucide-react";
-
+import { Moon, Sun, FileText, ShieldCheck, Car, Users } from "lucide-react";
 
 export default function Header({ 
   usuario, 
@@ -27,22 +26,29 @@ export default function Header({
             >
               <FileText className="w-4 h-4" /> Reportes
             </button>
+            
             <button
               onClick={() => onNavigate("guardias")}
               className="bg-orange-600 hover:bg-orange-700 px-3 py-2 rounded-lg transition-colors flex items-center gap-2"
             >
               <ShieldCheck className="w-4 h-4" /> Guardias
             </button>
+            
             <button
-                onClick={() => onNavigate("vehiculos")}
-                className="bg-blue-600 hover:bg-blue-700 px-3 py-2 rounded-lg transition-colors flex items-center gap-2"
-                >
-                    <Car className="w-4 h-4" /> Vehículos
-                </button>
+              onClick={() => onNavigate("vehiculos")}
+              className="bg-blue-600 hover:bg-blue-700 px-3 py-2 rounded-lg transition-colors flex items-center gap-2"
+            >
+              <Car className="w-4 h-4" /> Vehículos
+            </button>
 
+            <button
+              onClick={() => onNavigate("usuarios")}
+              className="bg-cyan-600 hover:bg-cyan-700 px-3 py-2 rounded-lg transition-colors flex items-center gap-2"
+            >
+              <Users className="w-4 h-4" /> 
+              {usuario?.permisoId === 1 ? 'Usuarios' : 'Guardias'}
+            </button>
           </>
-            
-            
         )}
 
         <button
