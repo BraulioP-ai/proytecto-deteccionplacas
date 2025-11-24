@@ -509,8 +509,9 @@ app.put("/usuarios/:id", async (req, res) => {
     let query;
     let params;
 
-    // Si se proporciona nueva contraseña, hashearla
-    if (contrasena && contrasena.trim() !== "") {
+    // Si se proporciona contraseña (campo existe y no está vacío), hashearla
+    if (contrasena !== undefined && contrasena !== null && contrasena.trim() !== "") {
+      console.log("🔐 Actualizando con nueva contraseña para usuario:", nombreUsuario);
       const bcrypt = await import('bcryptjs');
       const hashedPassword = bcrypt.default.hashSync(contrasena, 10);
       
@@ -522,6 +523,7 @@ app.put("/usuarios/:id", async (req, res) => {
       params = [nombreUsuario, hashedPassword, permisoId, estatus, id];
     } else {
       // Sin cambio de contraseña
+      console.log("📝 Actualizando SIN cambiar contraseña para usuario:", nombreUsuario);
       query = `
         UPDATE UsuariosSistema 
         SET NombreUsuario = ?, PermisoID = ?, Estatus = ?
@@ -543,6 +545,7 @@ app.put("/usuarios/:id", async (req, res) => {
         return res.status(404).json({ error: "Usuario no encontrado" });
       }
 
+      console.log("✅ Usuario actualizado exitosamente");
       res.json({ message: "Usuario actualizado exitosamente" });
     });
   } catch (error) {
